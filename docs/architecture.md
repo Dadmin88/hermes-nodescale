@@ -6,6 +6,10 @@ Nodescale owns managed membership, Nodescale device identity, roles, lifecycle, 
 
 Mesh membership is never application authorization.
 
+N2A imports an explicitly configured provider instance and persists normalized observations separately from trusted device records. Reconciliation is a deterministic one-shot library operation designed for later scheduling; it performs no provider mutation. See [Network Import and Read-Only Reconciliation](discovery-reconciliation.md).
+
+**A Headscale node appearing in Nodescale discovery does not make it a trusted Hermes Fleet node.**
+
 ## Workspace crates
 
 The workspace deliberately has five crates. The domain crate is pure. State owns one SQLite database and never reads provider, Keryx, or Hermes Fleet databases. Provider models are normalized before they can enter trusted state. The fake provider is deterministic test infrastructure, not production identity evidence. The Headscale crate is an async HTTPS inspection adapter with a read-only trait that contains no mutation methods.

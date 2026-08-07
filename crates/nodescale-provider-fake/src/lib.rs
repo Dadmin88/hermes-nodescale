@@ -32,6 +32,11 @@ pub struct FakeProvider {
     credentials: BTreeMap<String, bool>,
     principals: BTreeSet<String>,
     policy: ProviderPolicy,
+    /// Test-only async read projection override. It is never consulted by the
+    /// legacy mutable N0C `Provider` contract.
+    read_only_snapshot: Option<Vec<ProviderNode>>,
+    read_only_provider_name: String,
+    read_only_provider_version: String,
     next_node: u64,
     next_credential: u64,
     next_failure: Mutex<Option<FakeFailure>>,
@@ -73,6 +78,9 @@ impl FakeProvider {
                 revision: "fake-policy-0".into(),
                 normalized_rules: BTreeMap::new(),
             },
+            read_only_snapshot: None,
+            read_only_provider_name: "nodescale-fake".into(),
+            read_only_provider_version: "1".into(),
             next_node: 1,
             next_credential: 1,
             next_failure: Mutex::new(None),
@@ -84,6 +92,28 @@ impl FakeProvider {
             .next_failure
             .get_mut()
             .expect("fake failure mutex is healthy") = Some(failure);
+    }
+
+    /// Direct deterministic test seeding for the strictly read-only async
+    /// projection. It is not provider mutation authority and deliberately
+    /// permits malformed/duplicate snapshots so reconcilers can fail closed.
+    pub fn seed_read_only_snapshot(&mut self, nodes: Vec<ProviderNode>) {
+        self.read_only_snapshot = Some(nodes);
+    }
+
+    /// Configure the async fake as a deterministic stock-Headscale fixture so
+    /// import/reconciliation tests exercise the same provider-neutral path.
+    #[must_use]
+    pub fn headscale_fixture(fixture: &str) -> Self {
+        let mut provider = Self::compatible(fixture);
+        provider.read_only_provider_name = "headscale".into();
+        provider.read_only_provider_version = "v0.29.3".into();
+        provider
+    }
+
+    /// Return the async read projection to the legacy fixture inventory.
+    pub fn clear_read_only_snapshot(&mut self) {
+        self.read_only_snapshot = None;
     }
 
     pub fn observe_join(
@@ -391,8 +421,8 @@ impl ReadOnlyProvider for FakeProvider {
             _ => {}
         }
         Ok(ServerInspection {
-            provider_name: "nodescale-fake".into(),
-            provider_version: "1".into(),
+            provider_name: self.read_only_provider_name.clone(),
+            provider_version: self.read_only_provider_version.clone(),
             instance_id: self.instance_id,
             compatibility: self.compatibility,
             capabilities: Self::read_capabilities(),
@@ -402,14 +432,25 @@ impl ReadOnlyProvider for FakeProvider {
     }
 
     async fn list_nodes(&self) -> Result<Vec<ProviderNode>, ProviderError> {
-        Provider::list_nodes(self)
+        self.check_read()?;
+        Ok(self
+            .read_only_snapshot
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.nodes.values().cloned().collect()))
     }
 
     async fn get_node(
         &self,
         identity: &ProviderIdentity,
     ) -> Result<Option<ProviderNode>, ProviderError> {
-        Provider::get_node(self, identity)
+        self.check_read()?;
+        self.matches_instance(identity)?;
+        let nodes = self
+            .read_only_snapshot
+            .as_ref()
+            .map_or_else(|| self.nodes.values().cloned().collect(), Clone::clone);
+        Ok(nodes.into_iter().find(|node| node.identity == *identity))
     }
 
     async fn provider_health(&self) -> Result<ProviderHealth, ProviderError> {

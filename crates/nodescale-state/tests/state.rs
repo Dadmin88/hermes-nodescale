@@ -337,3 +337,69 @@ fn stale_concurrent_mutation_is_rejected() {
         Err(StateError::StaleGeneration { .. })
     ));
 }
+
+#[test]
+fn n1a_schema_upgrades_transactionally_to_n2a_discovery_schema() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("n1a-upgrade.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(include_str!("../migrations/0001_initial.sql"))
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO networks (network_id,name,state,provider_kind,provider_instance_id,membership_generation,policy_generation,record_json,created_at,updated_at)
+             VALUES ('network-1','legacy','creating','headscale','provider-1',1,1,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO provider_observations (observation_id,network_id,device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,observed_at,normalized_json)
+             VALUES ('observation-1','network-1',NULL,'provider-1','node-1','machine-old','2026-01-01T00:00:00Z','{}');
+             INSERT INTO provider_observations (observation_id,network_id,device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,observed_at,normalized_json)
+             VALUES ('observation-2','network-1',NULL,'provider-1','node-1','machine-new','2026-01-02T00:00:00Z','{}');",
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", 1_u32)
+        .unwrap();
+    drop(connection);
+
+    let store = StateStore::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let observation_columns = connection
+        .prepare("PRAGMA table_info(provider_observations)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for required in [
+        "classification",
+        "adoption_state",
+        "semantic_fingerprint",
+        "first_observed_at",
+        "last_observed_at",
+        "snapshot_at",
+    ] {
+        assert!(observation_columns.iter().any(|column| column == required));
+    }
+    let provider_imports_exists: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='provider_imports'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(provider_imports_exists, 1);
+    let migrated: (u64, String, String, String) = connection
+        .query_row(
+            "SELECT COUNT(*),stable_key_fingerprint,first_observed_at,last_observed_at FROM provider_observations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(migrated.0, 1);
+    assert_eq!(migrated.1, "machine-new");
+    assert_eq!(migrated.2, "2026-01-01T00:00:00Z");
+    assert_eq!(migrated.3, "2026-01-02T00:00:00Z");
+}

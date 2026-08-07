@@ -178,3 +178,32 @@ async fn async_read_projection_matches_real_fail_closed_status_semantics() {
     );
     assert!(!unreachable_health.reachable);
 }
+
+#[tokio::test]
+async fn explicit_read_only_snapshot_controls_cover_duplicate_and_recovery_scenarios() {
+    let mut provider = FakeProvider::compatible("n2a-scenarios");
+    let credential = provider
+        .create_join_credential(&JoinCredentialRequest::single_use("worker"))
+        .unwrap();
+    let first = provider.observe_join(&credential, "worker-1").unwrap();
+    provider.seed_read_only_snapshot(vec![first.clone(), first.clone()]);
+    let duplicate = nodescale_provider::ReadOnlyProvider::list_nodes(&provider)
+        .await
+        .unwrap();
+    assert_eq!(duplicate.len(), 2);
+    provider.seed_read_only_snapshot(vec![]);
+    assert!(
+        nodescale_provider::ReadOnlyProvider::list_nodes(&provider)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    provider.clear_read_only_snapshot();
+    assert_eq!(
+        nodescale_provider::ReadOnlyProvider::list_nodes(&provider)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

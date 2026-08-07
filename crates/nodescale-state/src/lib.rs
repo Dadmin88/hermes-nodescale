@@ -1,21 +1,28 @@
 //! Nodescale-owned SQLite durable state and transactional audit foundation.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use nodescale_domain::{
     AuditActor, AuditEventId, Device, DeviceGenerations, DeviceId, Generation, Invitation,
-    JoinSession, JoinSessionId, JoinSessionState, MembershipState, Network, NetworkId, Revocation,
-    RevocationState,
+    JoinSession, JoinSessionId, JoinSessionState, MembershipState, Network, NetworkId,
+    ProviderInstanceId, ProviderKind, Revocation, RevocationState,
+};
+use nodescale_provider::{
+    CompatibilityStatus, ProviderError, ProviderNode, ReadOnlyProvider, ServerInspection,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
     path::Path,
 };
 use thiserror::Error;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
+const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -42,6 +49,160 @@ pub enum StateError {
     ActivationGated,
     #[error("record not found: {0}")]
     NotFound(String),
+}
+
+/// TLS verification deliberately has no insecure option in N2A imports.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsVerificationPolicy {
+    Verify,
+}
+
+/// Persistable Headscale import configuration. The API key is deliberately not
+/// accepted here; only an opaque secret reference may be stored.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HeadscaleImportConfig {
+    pub server_url: String,
+    pub provider_instance_id: ProviderInstanceId,
+    pub opaque_secret_reference: String,
+    pub compatibility_pin: String,
+    pub tls_verification: TlsVerificationPolicy,
+    pub read_only: bool,
+    pub mutation_allowed: bool,
+}
+impl HeadscaleImportConfig {
+    pub fn new(
+        server_url: impl Into<String>,
+        provider_instance_id: ProviderInstanceId,
+        opaque_secret_reference: impl Into<String>,
+        compatibility_pin: impl Into<String>,
+        tls_verification: TlsVerificationPolicy,
+    ) -> Result<Self, StateError> {
+        let server_url = server_url.into();
+        let opaque_secret_reference = opaque_secret_reference.into();
+        let compatibility_pin = compatibility_pin.into();
+        let host = server_url.strip_prefix("https://").unwrap_or_default();
+        if host.is_empty()
+            || host.contains(['/', '@', '?', '#'])
+            || server_url.chars().any(char::is_whitespace)
+        {
+            return Err(StateError::Conflict(
+                "Headscale server URL must be a clean HTTPS origin".into(),
+            ));
+        }
+        if !opaque_secret_reference.starts_with("secret://")
+            || opaque_secret_reference.len() > 255
+            || opaque_secret_reference.chars().any(char::is_whitespace)
+        {
+            return Err(StateError::Conflict(
+                "credential must be an opaque secret:// reference, not plaintext".into(),
+            ));
+        }
+        if compatibility_pin.is_empty()
+            || compatibility_pin.len() > 64
+            || compatibility_pin.chars().any(char::is_whitespace)
+        {
+            return Err(StateError::Conflict(
+                "Headscale compatibility pin is invalid".into(),
+            ));
+        }
+        Ok(Self {
+            server_url,
+            provider_instance_id,
+            opaque_secret_reference,
+            compatibility_pin,
+            tls_verification,
+            read_only: true,
+            mutation_allowed: false,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationClassification {
+    ExpectedJoining,
+    DiscoveredUnmanaged,
+    Active,
+    ProviderMissing,
+    ProviderExpired,
+    ProviderRemoved,
+    IdentityConflict,
+    Quarantined,
+    Revoked,
+}
+
+/// Adoption is staging only. Even `PendingDeviceCredentialProof` cannot create
+/// a trusted device, Keryx binding, Fleet projection, grant, or execution right.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptionState {
+    Unmanaged,
+    PendingDeviceCredentialProof,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderObservation {
+    pub network_id: NetworkId,
+    pub device_id: Option<DeviceId>,
+    pub provider_instance_id: ProviderInstanceId,
+    pub canonical_provider_node_id: String,
+    pub stable_machine_key_fingerprint: String,
+    pub node: ProviderNode,
+    pub classification: ObservationClassification,
+    pub adoption_state: AdoptionState,
+    pub semantic_fingerprint: String,
+    pub first_observed_at: DateTime<Utc>,
+    pub last_observed_at: DateTime<Utc>,
+    pub snapshot_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderReconciliationState {
+    NeverReconciled,
+    Healthy,
+    Unreachable,
+    AuthenticationFailed,
+    Incompatible,
+    Malformed,
+    IdentityConflict,
+    StateFailure,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReconciliationReport {
+    pub network_id: NetworkId,
+    pub provider_state: ProviderReconciliationState,
+    pub provider_compatibility: CompatibilityStatus,
+    pub provider_version: String,
+    pub last_attempted_reconciliation: Option<DateTime<Utc>>,
+    pub last_successful_reconciliation: Option<DateTime<Utc>>,
+    pub observed_count: u64,
+    pub discovered_unmanaged_count: u64,
+    pub provider_missing_count: u64,
+    pub provider_expired_count: u64,
+    pub identity_conflict_count: u64,
+    pub quarantined_count: u64,
+    pub active_trusted_count: u64,
+    pub warnings: Vec<String>,
+    pub provider_mutation_enabled: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum ReconciliationFailure {
+    #[error("provider unreachable")]
+    Unreachable,
+    #[error("provider authentication failed")]
+    AuthenticationFailed,
+    #[error("provider is incompatible")]
+    Incompatible,
+    #[error("provider response is malformed")]
+    Malformed,
+    #[error("provider identity conflict")]
+    IdentityConflict,
+    #[error("state failure: {0}")]
+    State(#[from] StateError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,9 +249,27 @@ impl StateStore {
         }
         if found == 0 {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection.execute_batch(INITIAL_MIGRATION).and_then(|()| {
-                connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-            });
+            let migration_result = connection
+                .execute_batch(INITIAL_MIGRATION)
+                .and_then(|()| connection.pragma_update(None, "user_version", 1_u32))
+                .and_then(|()| connection.execute_batch(DISCOVERY_MIGRATION))
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 1 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result = connection
+                .execute_batch(DISCOVERY_MIGRATION)
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
             match migration_result {
                 Ok(()) => connection.execute_batch("COMMIT;")?,
                 Err(error) => {
@@ -383,6 +562,258 @@ impl StateStore {
         })
     }
 
+    /// Import one configured Headscale provider only after a compatible,
+    /// identity-matching, permanently read-only inspection succeeds.
+    pub async fn import_headscale_network(
+        &self,
+        network: &Network,
+        config: &HeadscaleImportConfig,
+        provider: &dyn ReadOnlyProvider,
+        snapshot_at: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<(), ReconciliationFailure> {
+        if network.provider_kind != ProviderKind::Headscale
+            || network.provider_instance_id != config.provider_instance_id
+            || provider.instance_id() != config.provider_instance_id
+            || !config.read_only
+            || config.mutation_allowed
+        {
+            return Err(ReconciliationFailure::Incompatible);
+        }
+        let inspection = provider
+            .inspect_server()
+            .await
+            .map_err(map_provider_failure)?;
+        validate_inspection(&inspection, config)?;
+        let nodes = provider.list_nodes().await.map_err(map_provider_failure)?;
+        let nodes = validate_snapshot(nodes, config.provider_instance_id)?;
+        self.transactional(|tx, store| {
+            let record = serde_json::to_string(network)?;
+            tx.execute("INSERT INTO networks (network_id,name,state,provider_kind,provider_instance_id,membership_generation,policy_generation,record_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![network.network_id.to_string(), network.name, lower(network.state.as_str()), "headscale", network.provider_instance_id.to_string(), to_i64(network.membership_generation)?, to_i64(network.policy_generation)?, record, network.created_at.to_rfc3339(), network.updated_at.to_rfc3339()]).map_err(map_constraint)?;
+            tx.execute("INSERT INTO membership_generations (network_id,generation,updated_at) VALUES (?1,?2,?3)", params![network.network_id.to_string(), to_i64(network.membership_generation)?, network.updated_at.to_rfc3339()]).map_err(map_constraint)?;
+            tx.execute("INSERT INTO provider_imports (network_id,provider_instance_id,server_url,opaque_secret_reference,compatibility_pin,tls_verification,read_only,mutation_allowed,compatibility,provider_version,last_success_at,last_attempt_at) VALUES (?1,?2,?3,?4,?5,'verify',1,0,?6,?7,?8,?8)", params![network.network_id.to_string(), config.provider_instance_id.to_string(), config.server_url, config.opaque_secret_reference, config.compatibility_pin, compatibility_name(inspection.compatibility), inspection.provider_version, snapshot_at.to_rfc3339()]).map_err(map_constraint)?;
+            store.append_audit(tx, Some(network.network_id), None, actor.clone(), "network_imported", "success", Some(network.membership_generation), &SanitizedMetadata::empty())?;
+            store.append_audit(tx, Some(network.network_id), None, actor.clone(), "provider_reconciliation_started", "success", None, &SanitizedMetadata::empty())?;
+            for node in &nodes {
+                let classification = if node.expired {
+                    ObservationClassification::ProviderExpired
+                } else {
+                    ObservationClassification::DiscoveredUnmanaged
+                };
+                insert_new_observation(
+                    tx,
+                    network.network_id,
+                    config.provider_instance_id,
+                    node,
+                    classification,
+                    snapshot_at,
+                )?;
+                store.append_audit(
+                    tx,
+                    Some(network.network_id),
+                    None,
+                    actor.clone(),
+                    if node.expired { "provider_node_expired" } else { "provider_node_discovered" },
+                    "success",
+                    None,
+                    &SanitizedMetadata::empty(),
+                )?;
+            }
+            store.append_audit(tx, Some(network.network_id), None, actor, "provider_reconciliation_completed", "success", None, &SanitizedMetadata::empty())
+        })?;
+        Ok(())
+    }
+
+    /// Apply a complete successful snapshot. No device is created or activated;
+    /// provider observations remain untrusted evidence.
+    pub async fn reconcile_read_only(
+        &self,
+        network_id: NetworkId,
+        provider: &dyn ReadOnlyProvider,
+        snapshot_at: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<ReconciliationReport, ReconciliationFailure> {
+        let (configured_instance, config) = self.import_config(network_id)?;
+        if provider.instance_id() != configured_instance {
+            self.record_provider_failure(
+                network_id,
+                snapshot_at,
+                "identity_conflict",
+                "provider instance mismatch",
+                actor.clone(),
+            )?;
+            return Err(ReconciliationFailure::IdentityConflict);
+        }
+        let inspection = match provider.inspect_server().await {
+            Ok(value) => value,
+            Err(error) => {
+                let failure = map_provider_failure(error);
+                self.record_failure_for(network_id, snapshot_at, &failure, actor.clone())?;
+                return Err(failure);
+            }
+        };
+        if let Err(failure) = validate_inspection(&inspection, &config) {
+            self.record_failure_for(network_id, snapshot_at, &failure, actor.clone())?;
+            return Err(failure);
+        }
+        let nodes = match provider.list_nodes().await {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                let failure = map_provider_failure(error);
+                self.record_failure_for(network_id, snapshot_at, &failure, actor.clone())?;
+                return Err(failure);
+            }
+        };
+        let nodes = match validate_snapshot(nodes, configured_instance) {
+            Ok(nodes) => nodes,
+            Err(failure) => {
+                self.record_failure_for(network_id, snapshot_at, &failure, actor.clone())?;
+                return Err(failure);
+            }
+        };
+        self.transactional(|tx, store| {
+            let existing = load_observations(tx, network_id)?;
+            let incoming_ids = nodes.iter().map(|node| node.identity.node_id.to_string()).collect::<BTreeSet<_>>();
+            let mut semantic_change = false;
+            let mut changes = Vec::new();
+            for node in &nodes {
+                let key = node.identity.node_id.to_string();
+                let previous = existing.get(&key);
+                let (stored_node, classification, fingerprint, changed, event_kind) = match previous {
+                    Some(old)
+                        if old.stable_machine_key_fingerprint
+                            != node.identity.stable_key_fingerprint
+                            || old.node.identity_evidence.machine_key
+                                != node.identity_evidence.machine_key => (
+                        old.node.clone(), ObservationClassification::IdentityConflict, old.semantic_fingerprint.clone(),
+                        old.classification != ObservationClassification::IdentityConflict, "provider_identity_conflict",
+                    ),
+                    Some(old) => {
+                        let classification = next_classification(old.classification, node);
+                        let fingerprint = semantic_fingerprint(node)?;
+                        let changed = old.semantic_fingerprint != fingerprint || old.classification != classification;
+                        (node.clone(), classification, fingerprint, changed, if classification == ObservationClassification::ProviderExpired { "provider_node_expired" } else { "provider_node_changed" })
+                    }
+                    None => {
+                        let classification = if node.expired { ObservationClassification::ProviderExpired } else { ObservationClassification::DiscoveredUnmanaged };
+                        (node.clone(), classification, semantic_fingerprint(node)?, true, "provider_node_discovered")
+                    }
+                };
+                if changed { semantic_change = true; changes.push((key.clone(), event_kind)); }
+                let serialized = serde_json::to_string(&stored_node)?;
+                let first = previous.map(|old| old.first_observed_at).unwrap_or(snapshot_at);
+                let device_id = previous.and_then(|old| old.device_id);
+                tx.execute("INSERT INTO provider_observations (observation_id,network_id,device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'unmanaged',?8,?9,?10,?11,?12) ON CONFLICT(provider_instance_id,provider_node_id) DO UPDATE SET device_id=excluded.device_id,classification=excluded.classification,semantic_fingerprint=excluded.semantic_fingerprint,normalized_json=excluded.normalized_json,last_observed_at=excluded.last_observed_at,snapshot_at=excluded.snapshot_at", params![uuid::Uuid::new_v4().to_string(), network_id.to_string(), device_id.map(|id| id.to_string()), configured_instance.to_string(), key, previous.map(|old| old.stable_machine_key_fingerprint.clone()).unwrap_or_else(|| node.identity.stable_key_fingerprint.clone()), classification_name(classification), fingerprint, serialized, first.to_rfc3339(), snapshot_at.to_rfc3339(), snapshot_at.to_rfc3339()])?;
+            }
+            for (key, old) in &existing {
+                if !incoming_ids.contains(key) && old.classification != ObservationClassification::ProviderMissing {
+                    semantic_change = true;
+                    changes.push((key.clone(), "provider_node_missing"));
+                    tx.execute("UPDATE provider_observations SET classification='provider_missing',snapshot_at=?3 WHERE provider_instance_id=?1 AND provider_node_id=?2", params![configured_instance.to_string(), key, snapshot_at.to_rfc3339()])?;
+                }
+            }
+            if semantic_change {
+                store.append_audit(tx, Some(network_id), None, actor.clone(), "provider_reconciliation_started", "success", None, &SanitizedMetadata::empty())?;
+                for (_, kind) in &changes {
+                    store.append_audit(tx, Some(network_id), None, actor.clone(), kind, "success", None, &SanitizedMetadata::empty())?;
+                }
+                store.append_audit(tx, Some(network_id), None, actor, "provider_reconciliation_completed", "success", None, &SanitizedMetadata::empty())?;
+            }
+            tx.execute("UPDATE provider_imports SET compatibility=?2,provider_version=?3,last_success_at=?4,last_attempt_at=?4,last_failure_kind=NULL,last_failure_detail=NULL WHERE network_id=?1", params![network_id.to_string(), compatibility_name(inspection.compatibility), inspection.provider_version, snapshot_at.to_rfc3339()])?;
+            Ok(())
+        })?;
+        self.reconciliation_report(network_id)
+            .map_err(ReconciliationFailure::State)
+    }
+
+    /// Return persisted, sanitized doctor state, including outages without
+    /// discarding the last successful inventory snapshot.
+    pub fn reconciliation_report(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<ReconciliationReport, StateError> {
+        let connection = self.connection.borrow();
+        let mut counts = BTreeMap::<String, u64>::new();
+        let mut statement = connection.prepare(
+            "SELECT classification,COUNT(*) FROM provider_observations WHERE network_id=?1 GROUP BY classification",
+        )?;
+        let rows = statement.query_map([network_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        for row in rows {
+            let (classification, count) = row?;
+            counts.insert(classification, count);
+        }
+        let (compatibility, provider_version, last_success, last_attempt, failure_kind, failure_detail) = connection
+            .query_row(
+                "SELECT compatibility,provider_version,last_success_at,last_attempt_at,last_failure_kind,last_failure_detail FROM provider_imports WHERE network_id=?1",
+                [network_id.to_string()],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                )),
+            )
+            .optional()?
+            .ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
+        let parse_time = |value: Option<String>| -> Result<Option<DateTime<Utc>>, StateError> {
+            value
+                .map(|value| value.parse::<DateTime<Utc>>())
+                .transpose()
+                .map_err(|_| StateError::Conflict("invalid persisted reconciliation time".into()))
+        };
+        let provider_state = match failure_kind.as_deref() {
+            None if last_success.is_some() => ProviderReconciliationState::Healthy,
+            None => ProviderReconciliationState::NeverReconciled,
+            Some("unreachable") => ProviderReconciliationState::Unreachable,
+            Some("authentication") => ProviderReconciliationState::AuthenticationFailed,
+            Some("incompatible") => ProviderReconciliationState::Incompatible,
+            Some("malformed") => ProviderReconciliationState::Malformed,
+            Some("identity_conflict") => ProviderReconciliationState::IdentityConflict,
+            Some("state") => ProviderReconciliationState::StateFailure,
+            Some(_) => ProviderReconciliationState::StateFailure,
+        };
+        Ok(ReconciliationReport {
+            network_id,
+            provider_state,
+            provider_compatibility: parse_compatibility(&compatibility)?,
+            provider_version,
+            last_attempted_reconciliation: parse_time(last_attempt)?,
+            last_successful_reconciliation: parse_time(last_success)?,
+            observed_count: counts.values().copied().sum(),
+            discovered_unmanaged_count: *counts.get("discovered_unmanaged").unwrap_or(&0),
+            provider_missing_count: *counts.get("provider_missing").unwrap_or(&0),
+            provider_expired_count: *counts.get("provider_expired").unwrap_or(&0),
+            identity_conflict_count: *counts.get("identity_conflict").unwrap_or(&0),
+            quarantined_count: *counts.get("quarantined").unwrap_or(&0),
+            active_trusted_count: *counts.get("active").unwrap_or(&0),
+            warnings: failure_detail.into_iter().collect(),
+            provider_mutation_enabled: false,
+        })
+    }
+
+    pub fn provider_observations(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<Vec<ProviderObservation>, StateError> {
+        load_observations(&self.connection.borrow(), network_id)
+            .map(|entries| entries.into_values().collect())
+    }
+
+    pub fn device_count(&self, network_id: NetworkId) -> Result<u64, StateError> {
+        self.count("devices", network_id)
+    }
+    pub fn keryx_binding_count(&self, network_id: NetworkId) -> Result<u64, StateError> {
+        self.count("keryx_bindings", network_id)
+    }
+    /// N2A has no Fleet projection table or behavior; this truthful count is zero.
+    pub fn fleet_projection_count(&self, _network_id: NetworkId) -> Result<u64, StateError> {
+        Ok(0)
+    }
+
     pub fn database_text_dump_for_test(&self) -> Result<String, StateError> {
         let connection = self.connection.borrow();
         let mut output = String::new();
@@ -390,6 +821,8 @@ impl StateStore {
             "SELECT record_json || secret_verifier FROM invitations",
             "SELECT record_json || display_name || COALESCE(provider_key_fingerprint,'') FROM devices",
             "SELECT metadata_json || event_kind || actor_source || COALESCE(actor_id,'') FROM audit_events",
+            "SELECT server_url || opaque_secret_reference || compatibility_pin || COALESCE(last_failure_detail,'') FROM provider_imports",
+            "SELECT stable_key_fingerprint || semantic_fingerprint || normalized_json FROM provider_observations",
         ] {
             let mut statement = connection.prepare(query)?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
@@ -398,6 +831,93 @@ impl StateStore {
             }
         }
         Ok(output)
+    }
+
+    fn import_config(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<(ProviderInstanceId, HeadscaleImportConfig), StateError> {
+        let row = self.connection.borrow().query_row("SELECT provider_instance_id,server_url,opaque_secret_reference,compatibility_pin FROM provider_imports WHERE network_id=?1", [network_id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))).optional()?.ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
+        let instance = ProviderInstanceId::parse(&row.0)
+            .map_err(|error| StateError::Conflict(error.to_string()))?;
+        let config = HeadscaleImportConfig::new(
+            row.1,
+            instance,
+            row.2,
+            row.3,
+            TlsVerificationPolicy::Verify,
+        )?;
+        Ok((instance, config))
+    }
+
+    fn record_failure_for(
+        &self,
+        network_id: NetworkId,
+        at: DateTime<Utc>,
+        failure: &ReconciliationFailure,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        let (kind, detail) = match failure {
+            ReconciliationFailure::Unreachable => ("unreachable", "provider unreachable"),
+            ReconciliationFailure::AuthenticationFailed => {
+                ("authentication", "provider authentication failed")
+            }
+            ReconciliationFailure::Incompatible => {
+                ("incompatible", "provider compatibility rejected")
+            }
+            ReconciliationFailure::Malformed => ("malformed", "provider response malformed"),
+            ReconciliationFailure::IdentityConflict => {
+                ("identity_conflict", "provider identity conflict")
+            }
+            ReconciliationFailure::State(_) => ("state", "local state failure"),
+        };
+        self.record_provider_failure(network_id, at, kind, detail, actor)
+    }
+
+    fn record_provider_failure(
+        &self,
+        network_id: NetworkId,
+        at: DateTime<Utc>,
+        kind: &str,
+        detail: &str,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        self.transactional(|tx, store| {
+            let previous = tx
+                .query_row(
+                    "SELECT last_failure_kind FROM provider_imports WHERE network_id=?1",
+                    [network_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
+            tx.execute("UPDATE provider_imports SET last_attempt_at=?2,last_failure_kind=?3,last_failure_detail=?4 WHERE network_id=?1", params![network_id.to_string(), at.to_rfc3339(), kind, detail])?;
+            if previous.as_deref() != Some(kind) {
+                store.append_audit(
+                    tx,
+                    Some(network_id),
+                    None,
+                    actor,
+                    "provider_reconciliation_failed",
+                    kind,
+                    None,
+                    &SanitizedMetadata::empty(),
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn count(&self, table: &str, network_id: NetworkId) -> Result<u64, StateError> {
+        let query = match table {
+            "devices" => "SELECT COUNT(*) FROM devices WHERE network_id=?1",
+            "keryx_bindings" => "SELECT COUNT(*) FROM keryx_bindings WHERE network_id=?1",
+            _ => return Err(StateError::Conflict("unknown count table".into())),
+        };
+        Ok(self
+            .connection
+            .borrow()
+            .query_row(query, [network_id.to_string()], |row| row.get(0))?)
     }
 
     fn transactional<T>(
@@ -433,6 +953,244 @@ impl StateStore {
         tx.execute("INSERT INTO audit_events (event_id,timestamp,network_id,device_id,actor_source,actor_id,event_kind,outcome,generation,metadata_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![AuditEventId::new().to_string(), Utc::now().to_rfc3339(), network_id.map(|id| id.to_string()), device_id.map(|id| id.to_string()), actor.source, actor.actor_id, kind, outcome, generation.map(to_i64).transpose()?, metadata.json()?])?;
         Ok(())
     }
+}
+
+fn validate_snapshot(
+    mut nodes: Vec<ProviderNode>,
+    expected_instance: ProviderInstanceId,
+) -> Result<Vec<ProviderNode>, ReconciliationFailure> {
+    nodes.sort_by(|left, right| left.identity.node_id.cmp(&right.identity.node_id));
+    let mut ids = BTreeSet::new();
+    for node in &nodes {
+        if node.identity.provider_instance_id != expected_instance
+            || !ids.insert(node.identity.node_id.to_string())
+        {
+            return Err(ReconciliationFailure::IdentityConflict);
+        }
+    }
+    Ok(nodes)
+}
+
+fn insert_new_observation(
+    tx: &Transaction<'_>,
+    network_id: NetworkId,
+    provider_instance_id: ProviderInstanceId,
+    node: &ProviderNode,
+    classification: ObservationClassification,
+    snapshot_at: DateTime<Utc>,
+) -> Result<(), StateError> {
+    tx.execute(
+        "INSERT INTO provider_observations (observation_id,network_id,device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at) VALUES (?1,?2,NULL,?3,?4,?5,?6,'unmanaged',?7,?8,?9,?9,?9)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            network_id.to_string(),
+            provider_instance_id.to_string(),
+            node.identity.node_id.to_string(),
+            node.identity.stable_key_fingerprint,
+            classification_name(classification),
+            semantic_fingerprint(node)?,
+            serde_json::to_string(node)?,
+            snapshot_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_inspection(
+    inspection: &ServerInspection,
+    config: &HeadscaleImportConfig,
+) -> Result<(), ReconciliationFailure> {
+    if inspection.provider_name != "headscale"
+        || inspection.instance_id != config.provider_instance_id
+        || inspection.mutation_allowed
+        || !matches!(
+            inspection.compatibility,
+            CompatibilityStatus::Compatible | CompatibilityStatus::CompatibleWithConstraints
+        )
+        || inspection.provider_version.trim_start_matches('v')
+            != config.compatibility_pin.trim_start_matches('v')
+    {
+        return Err(ReconciliationFailure::Incompatible);
+    }
+    Ok(())
+}
+
+fn map_provider_failure(error: ProviderError) -> ReconciliationFailure {
+    match error {
+        ProviderError::AuthenticationFailed => ReconciliationFailure::AuthenticationFailed,
+        ProviderError::MalformedResponse(_) => ReconciliationFailure::Malformed,
+        ProviderError::Conflict(_) => ReconciliationFailure::IdentityConflict,
+        ProviderError::Unsupported(_) | ProviderError::Rejected(_) => {
+            ReconciliationFailure::Incompatible
+        }
+        ProviderError::Unreachable(_)
+        | ProviderError::Timeout
+        | ProviderError::TlsFailure
+        | ProviderError::AmbiguousMutation(_) => ReconciliationFailure::Unreachable,
+    }
+}
+
+fn next_classification(
+    previous: ObservationClassification,
+    node: &ProviderNode,
+) -> ObservationClassification {
+    if node.expired {
+        return ObservationClassification::ProviderExpired;
+    }
+    match previous {
+        ObservationClassification::Active
+        | ObservationClassification::ExpectedJoining
+        | ObservationClassification::Quarantined
+        | ObservationClassification::Revoked => previous,
+        _ => ObservationClassification::DiscoveredUnmanaged,
+    }
+}
+
+fn semantic_fingerprint(node: &ProviderNode) -> Result<String, StateError> {
+    let mut stable = node.clone();
+    stable.observed_at = DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z")
+        .expect("fixed timestamp")
+        .with_timezone(&Utc);
+    let bytes = serde_json::to_vec(&stable)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn compatibility_name(value: CompatibilityStatus) -> &'static str {
+    match value {
+        CompatibilityStatus::Compatible => "compatible",
+        CompatibilityStatus::CompatibleWithConstraints => "compatible_with_constraints",
+        CompatibilityStatus::ReadOnlyDegraded => "read_only_degraded",
+        CompatibilityStatus::Unsupported => "unsupported",
+        CompatibilityStatus::Unreachable => "unreachable",
+        CompatibilityStatus::AuthenticationFailed => "authentication_failed",
+    }
+}
+
+fn parse_compatibility(value: &str) -> Result<CompatibilityStatus, StateError> {
+    match value {
+        "compatible" => Ok(CompatibilityStatus::Compatible),
+        "compatible_with_constraints" => Ok(CompatibilityStatus::CompatibleWithConstraints),
+        "read_only_degraded" => Ok(CompatibilityStatus::ReadOnlyDegraded),
+        "unsupported" => Ok(CompatibilityStatus::Unsupported),
+        "unreachable" => Ok(CompatibilityStatus::Unreachable),
+        "authentication_failed" => Ok(CompatibilityStatus::AuthenticationFailed),
+        _ => Err(StateError::Conflict(
+            "unknown persisted provider compatibility".into(),
+        )),
+    }
+}
+
+fn classification_name(value: ObservationClassification) -> &'static str {
+    match value {
+        ObservationClassification::ExpectedJoining => "expected_joining",
+        ObservationClassification::DiscoveredUnmanaged => "discovered_unmanaged",
+        ObservationClassification::Active => "active",
+        ObservationClassification::ProviderMissing => "provider_missing",
+        ObservationClassification::ProviderExpired => "provider_expired",
+        ObservationClassification::ProviderRemoved => "provider_removed",
+        ObservationClassification::IdentityConflict => "identity_conflict",
+        ObservationClassification::Quarantined => "quarantined",
+        ObservationClassification::Revoked => "revoked",
+    }
+}
+
+fn parse_adoption_state(value: &str) -> Result<AdoptionState, StateError> {
+    match value {
+        "unmanaged" => Ok(AdoptionState::Unmanaged),
+        "pending_device_credential_proof" => Ok(AdoptionState::PendingDeviceCredentialProof),
+        _ => Err(StateError::Conflict(
+            "unknown provider observation adoption state".into(),
+        )),
+    }
+}
+
+fn parse_classification(value: &str) -> Result<ObservationClassification, StateError> {
+    match value {
+        "expected_joining" => Ok(ObservationClassification::ExpectedJoining),
+        "discovered_unmanaged" => Ok(ObservationClassification::DiscoveredUnmanaged),
+        "active" => Ok(ObservationClassification::Active),
+        "provider_missing" => Ok(ObservationClassification::ProviderMissing),
+        "provider_expired" => Ok(ObservationClassification::ProviderExpired),
+        "provider_removed" => Ok(ObservationClassification::ProviderRemoved),
+        "identity_conflict" => Ok(ObservationClassification::IdentityConflict),
+        "quarantined" => Ok(ObservationClassification::Quarantined),
+        "revoked" => Ok(ObservationClassification::Revoked),
+        _ => Err(StateError::Conflict(
+            "unknown provider observation classification".into(),
+        )),
+    }
+}
+
+fn load_observations(
+    connection: &Connection,
+    network_id: NetworkId,
+) -> Result<BTreeMap<String, ProviderObservation>, StateError> {
+    let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 ORDER BY provider_node_id")?;
+    let rows = statement.query_map([network_id.to_string()], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+        ))
+    })?;
+    let mut observations = BTreeMap::new();
+    for row in rows {
+        let (
+            device_id,
+            provider_instance_id,
+            provider_node_id,
+            fingerprint,
+            classification,
+            adoption_state,
+            semantic_fingerprint,
+            normalized_json,
+            first,
+            last,
+            snapshot,
+        ) = row?;
+        let device_id = device_id
+            .map(|value| DeviceId::parse(&value))
+            .transpose()
+            .map_err(|error| StateError::Conflict(error.to_string()))?;
+        let provider_instance_id = ProviderInstanceId::parse(&provider_instance_id)
+            .map_err(|error| StateError::Conflict(error.to_string()))?;
+        let node = serde_json::from_str(&normalized_json)?;
+        let first_observed_at = first
+            .parse::<DateTime<Utc>>()
+            .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
+        let last_observed_at = last
+            .parse::<DateTime<Utc>>()
+            .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
+        let snapshot_at = snapshot
+            .parse::<DateTime<Utc>>()
+            .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
+        observations.insert(
+            provider_node_id.clone(),
+            ProviderObservation {
+                network_id,
+                device_id,
+                provider_instance_id,
+                canonical_provider_node_id: provider_node_id,
+                stable_machine_key_fingerprint: fingerprint,
+                node,
+                classification: parse_classification(&classification)?,
+                adoption_state: parse_adoption_state(&adoption_state)?,
+                semantic_fingerprint,
+                first_observed_at,
+                last_observed_at,
+                snapshot_at,
+            },
+        );
+    }
+    Ok(observations)
 }
 
 fn validate_next(expected: Generation, next: Generation) -> Result<(), StateError> {

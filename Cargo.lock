@@ -665,12 +665,19 @@ dependencies = [
 name = "nodescale-state"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "nodescale-domain",
+ "nodescale-provider",
+ "nodescale-provider-fake",
+ "nodescale-provider-headscale",
  "rusqlite",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 

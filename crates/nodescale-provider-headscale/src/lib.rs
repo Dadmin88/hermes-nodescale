@@ -620,7 +620,9 @@ struct RawPreAuthKey {
     id: String,
 }
 
-fn parse_nodes_fixture(
+/// Parse a sanitized Headscale `ListNodes` JSON fixture or captured response
+/// through the adapter's real normalization path without opening a network connection.
+pub fn parse_nodes_fixture(
     json: &str,
     instance_id: ProviderInstanceId,
     observed_at: DateTime<Utc>,
