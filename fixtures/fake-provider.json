@@ -1,0 +1,8 @@
+{
+  "provider": "fake",
+  "instance": "fixture-1",
+  "nodes": [
+    {"node_id": "fake-node-0001", "display_name": "controller-1"},
+    {"node_id": "fake-node-0002", "display_name": "worker-1"}
+  ]
+}

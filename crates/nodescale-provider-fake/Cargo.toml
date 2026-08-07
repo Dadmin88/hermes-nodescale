@@ -1,0 +1,15 @@
+[package]
+name = "nodescale-provider-fake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+nodescale-domain = { path = "../nodescale-domain" }
+nodescale-provider = { path = "../nodescale-provider" }
+
+[lints]
+workspace = true
