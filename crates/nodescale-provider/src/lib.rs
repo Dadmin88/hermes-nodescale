@@ -50,6 +50,8 @@ pub struct ServerInspection {
     pub compatibility: CompatibilityStatus,
     pub capabilities: BTreeSet<ProviderCapability>,
     pub constraints: Vec<String>,
+    /// An explicit adapter-mode gate in addition to version compatibility.
+    pub mutation_allowed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -64,7 +66,8 @@ impl CompatibilityReport {
         Self {
             status: inspection.compatibility,
             reason: inspection.constraints.join("; "),
-            mutation_allowed: inspection.compatibility.allows_mutation(),
+            mutation_allowed: inspection.compatibility.allows_mutation()
+                && inspection.mutation_allowed,
         }
     }
 }
@@ -103,13 +106,106 @@ impl JoinCredentialRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityEvidenceClass {
+    StrongImmutable,
+    StableConditional,
+    Mutable,
+    DisplayOnly,
+    UnsafeForIdentity,
+}
+
+macro_rules! identity_evidence {
+    ($name:ident, $class:expr, $kind:literal) => {
+        #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, ProviderError> {
+                let value = value.into();
+                if value.is_empty() || value.len() > 512 {
+                    return Err(ProviderError::MalformedResponse(concat!(
+                        $kind,
+                        " must be bounded and non-empty"
+                    )));
+                }
+                Ok(Self(value))
+            }
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+            #[must_use]
+            pub const fn class(&self) -> IdentityEvidenceClass {
+                $class
+            }
+        }
+    };
+}
+
+identity_evidence!(
+    StrongIdentityEvidence,
+    IdentityEvidenceClass::StrongImmutable,
+    "strong identity evidence"
+);
+identity_evidence!(
+    ConditionalIdentityEvidence,
+    IdentityEvidenceClass::StableConditional,
+    "conditional identity evidence"
+);
+identity_evidence!(
+    MutableIdentityEvidence,
+    IdentityEvidenceClass::Mutable,
+    "mutable identity observation"
+);
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderIdentityEvidence {
+    /// Strong correlation evidence, but replaceable in Headscale.
+    pub machine_key: ConditionalIdentityEvidence,
+    /// Rotating cryptographic observations; never canonical identity.
+    pub node_key: Option<MutableIdentityEvidence>,
+    pub disco_key: Option<MutableIdentityEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderUserObservation {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreAuthAssociationStrength {
+    Partial,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PreAuthCorrelationObservation {
+    pub credential_id: String,
+    pub association: PreAuthAssociationStrength,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderNode {
     pub identity: ProviderIdentity,
+    pub identity_evidence: ProviderIdentityEvidence,
+    /// Presentation metadata; never canonical identity.
     pub hostname: String,
+    /// Mutable provider-assigned display metadata.
+    pub given_name: String,
+    /// Addressing metadata; never canonical identity.
     pub addresses: Vec<String>,
+    pub user: Option<ProviderUserObservation>,
+    pub pre_auth: Option<PreAuthCorrelationObservation>,
     pub tags: BTreeSet<String>,
+    pub registered_at: Option<DateTime<Utc>>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
+    pub online: bool,
     pub expired: bool,
 }
 
@@ -119,8 +215,21 @@ pub struct ProviderPolicy {
     pub normalized_rules: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderHealthStatus {
+    Healthy,
+    ReachableIncompatible,
+    AuthenticationFailed,
+    TransportFailure,
+    TlsFailure,
+    Timeout,
+    MalformedResponse,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderHealth {
+    pub status: ProviderHealthStatus,
     pub reachable: bool,
     pub authenticated: bool,
     pub detail: String,
@@ -132,6 +241,12 @@ pub enum ProviderError {
     Unsupported(&'static str),
     #[error("provider is unreachable: {0}")]
     Unreachable(String),
+    #[error("provider request timed out")]
+    Timeout,
+    #[error("provider TLS verification failed")]
+    TlsFailure,
+    #[error("provider response is malformed: {0}")]
+    MalformedResponse(&'static str),
     #[error("provider authentication failed")]
     AuthenticationFailed,
     #[error("provider mutation outcome is ambiguous: {0}")]
@@ -142,6 +257,27 @@ pub enum ProviderError {
     Rejected(String),
 }
 
+/// Permanent async read boundary for real provider adapters.
+/// It contains no mutation methods, so a read-only adapter cannot accidentally
+/// gain write authority through this trait.
+#[async_trait::async_trait]
+pub trait ReadOnlyProvider: Send + Sync {
+    fn instance_id(&self) -> ProviderInstanceId;
+    async fn inspect_server(&self) -> Result<ServerInspection, ProviderError>;
+    async fn verify_compatibility(&self) -> Result<CompatibilityReport, ProviderError> {
+        self.inspect_server()
+            .await
+            .map(|inspection| CompatibilityReport::from_inspection(&inspection))
+    }
+    async fn list_nodes(&self) -> Result<Vec<ProviderNode>, ProviderError>;
+    async fn get_node(
+        &self,
+        identity: &ProviderIdentity,
+    ) -> Result<Option<ProviderNode>, ProviderError>;
+    async fn provider_health(&self) -> Result<ProviderHealth, ProviderError>;
+}
+
+/// N0C deterministic provider contract, including future mutation simulations.
 pub trait Provider {
     fn instance_id(&self) -> ProviderInstanceId;
     fn inspect_server(&self) -> Result<ServerInspection, ProviderError>;

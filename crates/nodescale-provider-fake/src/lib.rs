@@ -6,12 +6,14 @@ use nodescale_domain::{
     ProviderNodeId,
 };
 use nodescale_provider::{
-    CompatibilityStatus, JoinCredential, JoinCredentialRequest, Provider, ProviderCapability,
-    ProviderError, ProviderHealth, ProviderNode, ProviderPolicy, ServerInspection,
+    CompatibilityStatus, ConditionalIdentityEvidence, JoinCredential, JoinCredentialRequest,
+    MutableIdentityEvidence, Provider, ProviderCapability, ProviderError, ProviderHealth,
+    ProviderHealthStatus, ProviderIdentityEvidence, ProviderNode, ProviderPolicy, ReadOnlyProvider,
+    ServerInspection,
 };
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +34,7 @@ pub struct FakeProvider {
     policy: ProviderPolicy,
     next_node: u64,
     next_credential: u64,
-    next_failure: RefCell<Option<FakeFailure>>,
+    next_failure: Mutex<Option<FakeFailure>>,
 }
 
 impl FakeProvider {
@@ -73,12 +75,15 @@ impl FakeProvider {
             },
             next_node: 1,
             next_credential: 1,
-            next_failure: RefCell::new(None),
+            next_failure: Mutex::new(None),
         }
     }
 
     pub fn fail_next(&mut self, failure: FakeFailure) {
-        self.next_failure.replace(Some(failure));
+        *self
+            .next_failure
+            .get_mut()
+            .expect("fake failure mutex is healthy") = Some(failure);
     }
 
     pub fn observe_join(
@@ -98,18 +103,31 @@ impl FakeProvider {
         self.next_node += 1;
         let node_id = ProviderNodeId::parse(format!("fake-node-{node_number:04}"))
             .map_err(|error| ProviderError::Rejected(error.to_string()))?;
-        let identity = ProviderIdentity::new(
-            self.instance_id,
-            node_id,
-            format!("fake-stable-key-{node_number:04}"),
-        )
-        .map_err(|error| ProviderError::Rejected(error.to_string()))?;
+        let stable_key = format!("fake-stable-key-{node_number:04}");
+        let identity = ProviderIdentity::new(self.instance_id, node_id, stable_key.clone())
+            .map_err(|error| ProviderError::Rejected(error.to_string()))?;
         let node = ProviderNode {
             identity: identity.clone(),
+            identity_evidence: ProviderIdentityEvidence {
+                machine_key: ConditionalIdentityEvidence::new(stable_key)?,
+                node_key: Some(MutableIdentityEvidence::new(format!(
+                    "fake-node-key-{node_number:04}"
+                ))?),
+                disco_key: Some(MutableIdentityEvidence::new(format!(
+                    "fake-disco-key-{node_number:04}"
+                ))?),
+            },
             hostname: hostname.to_owned(),
+            given_name: hostname.to_owned(),
             addresses: vec![format!("198.51.100.{}", node_number.min(254))],
+            user: None,
+            pre_auth: None,
             tags: BTreeSet::new(),
+            registered_at: Some(fake_now()),
+            last_seen: None,
+            expires_at: None,
             observed_at: fake_now(),
+            online: true,
             expired: false,
         };
         self.nodes
@@ -136,8 +154,24 @@ impl FakeProvider {
         .collect()
     }
 
+    fn read_capabilities() -> BTreeSet<ProviderCapability> {
+        [
+            ProviderCapability::InspectServer,
+            ProviderCapability::ListNodes,
+            ProviderCapability::GetNode,
+            ProviderCapability::Health,
+        ]
+        .into_iter()
+        .collect()
+    }
+
     fn injected_failure(&self) -> Result<(), ProviderError> {
-        match self.next_failure.take() {
+        match self
+            .next_failure
+            .lock()
+            .expect("fake failure mutex is healthy")
+            .take()
+        {
             None => Ok(()),
             Some(FakeFailure::Unavailable) => {
                 Err(ProviderError::Unreachable("injected fake outage".into()))
@@ -201,6 +235,7 @@ impl Provider for FakeProvider {
                 CompatibilityStatus::AuthenticationFailed => vec!["authentication failed".into()],
                 _ => vec![],
             },
+            mutation_allowed: self.compatibility.allows_mutation(),
         })
     }
 
@@ -330,9 +365,86 @@ impl Provider for FakeProvider {
     fn provider_health(&self) -> Result<ProviderHealth, ProviderError> {
         self.check_read()?;
         Ok(ProviderHealth {
+            status: ProviderHealthStatus::Healthy,
             reachable: true,
             authenticated: true,
             detail: "deterministic fake healthy".into(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ReadOnlyProvider for FakeProvider {
+    fn instance_id(&self) -> ProviderInstanceId {
+        Provider::instance_id(self)
+    }
+
+    async fn inspect_server(&self) -> Result<ServerInspection, ProviderError> {
+        self.injected_failure()?;
+        match self.compatibility {
+            CompatibilityStatus::Unreachable => {
+                return Err(ProviderError::Unreachable("fake provider offline".into()));
+            }
+            CompatibilityStatus::AuthenticationFailed => {
+                return Err(ProviderError::AuthenticationFailed);
+            }
+            _ => {}
+        }
+        Ok(ServerInspection {
+            provider_name: "nodescale-fake".into(),
+            provider_version: "1".into(),
+            instance_id: self.instance_id,
+            compatibility: self.compatibility,
+            capabilities: Self::read_capabilities(),
+            constraints: vec!["async fake projection is strictly read-only".into()],
+            mutation_allowed: false,
+        })
+    }
+
+    async fn list_nodes(&self) -> Result<Vec<ProviderNode>, ProviderError> {
+        Provider::list_nodes(self)
+    }
+
+    async fn get_node(
+        &self,
+        identity: &ProviderIdentity,
+    ) -> Result<Option<ProviderNode>, ProviderError> {
+        Provider::get_node(self, identity)
+    }
+
+    async fn provider_health(&self) -> Result<ProviderHealth, ProviderError> {
+        self.injected_failure()?;
+        let (status, reachable, authenticated, detail) = match self.compatibility {
+            CompatibilityStatus::Compatible | CompatibilityStatus::CompatibleWithConstraints => (
+                ProviderHealthStatus::Healthy,
+                true,
+                true,
+                "deterministic fake healthy",
+            ),
+            CompatibilityStatus::ReadOnlyDegraded | CompatibilityStatus::Unsupported => (
+                ProviderHealthStatus::ReachableIncompatible,
+                true,
+                true,
+                "deterministic fake reachable but incompatible",
+            ),
+            CompatibilityStatus::AuthenticationFailed => (
+                ProviderHealthStatus::AuthenticationFailed,
+                true,
+                false,
+                "deterministic fake authentication failed",
+            ),
+            CompatibilityStatus::Unreachable => (
+                ProviderHealthStatus::TransportFailure,
+                false,
+                false,
+                "deterministic fake unreachable",
+            ),
+        };
+        Ok(ProviderHealth {
+            status,
+            reachable,
+            authenticated,
+            detail: detail.into(),
         })
     }
 }

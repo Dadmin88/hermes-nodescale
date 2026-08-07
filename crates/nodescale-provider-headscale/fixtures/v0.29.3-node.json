@@ -1,0 +1,16 @@
+{
+  "node": {
+    "id": "42",
+    "machineKey": "mkey:synthetic-machine-key",
+    "nodeKey": "nodekey:synthetic-node-key",
+    "discoKey": "discokey:synthetic-disco-key",
+    "ipAddresses": ["192.0.2.10", "2001:db8::10"],
+    "name": "worker-1",
+    "givenName": "worker-1",
+    "user": {"id": "7", "name": "user-1", "displayName": "User One"},
+    "preAuthKey": {"id": "9", "key": "<synthetic-preauth-credential>", "used": true},
+    "createdAt": "2026-07-29T12:00:00Z",
+    "online": true,
+    "tags": ["tag:worker"]
+  }
+}

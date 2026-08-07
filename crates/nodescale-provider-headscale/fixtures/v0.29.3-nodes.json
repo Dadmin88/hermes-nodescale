@@ -1,0 +1,45 @@
+{
+  "nodes": [
+    {
+      "id": "42",
+      "machineKey": "mkey:synthetic-machine-key",
+      "nodeKey": "nodekey:synthetic-node-key",
+      "discoKey": "discokey:synthetic-disco-key",
+      "ipAddresses": ["192.0.2.10", "2001:db8::10"],
+      "name": "worker-1",
+      "givenName": "worker-1",
+      "user": {"id": "7", "name": "user-1", "displayName": "User One"},
+      "lastSeen": "2026-07-29T12:00:00Z",
+      "expiry": "2026-08-29T12:00:00Z",
+      "preAuthKey": {
+        "id": "9",
+        "key": "<synthetic-preauth-credential>",
+        "user": {"id": "7", "name": "user-1", "displayName": "User One"},
+        "reusable": false,
+        "ephemeral": false,
+        "used": true,
+        "expiration": "2026-07-29T12:05:00Z",
+        "createdAt": "2026-07-29T11:59:00Z",
+        "aclTags": ["tag:worker"]
+      },
+      "createdAt": "2026-07-29T12:00:00Z",
+      "registerMethod": "REGISTER_METHOD_AUTH_KEY",
+      "online": true,
+      "tags": ["tag:worker"],
+      "futureField": "ignored"
+    },
+    {
+      "id": "43",
+      "machineKey": "mkey:synthetic-machine-key-2",
+      "nodeKey": "nodekey:synthetic-node-key-2",
+      "discoKey": "discokey:synthetic-disco-key-2",
+      "ipAddresses": ["192.0.2.11"],
+      "name": "controller-1",
+      "givenName": "controller-1",
+      "user": {"id": "7", "name": "user-1", "displayName": "User One"},
+      "createdAt": "2026-07-29T12:01:00Z",
+      "online": false,
+      "tags": ["tag:controller"]
+    }
+  ]
+}

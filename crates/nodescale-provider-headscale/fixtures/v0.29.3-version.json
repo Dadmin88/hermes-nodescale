@@ -1,0 +1,7 @@
+{
+  "version": "v0.29.3",
+  "commit": "synthetic",
+  "buildTime": "2026-07-29T00:00:00Z",
+  "go": {"version": "go1.25.0", "os": "linux", "arch": "amd64"},
+  "dirty": false
+}

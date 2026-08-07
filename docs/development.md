@@ -27,9 +27,13 @@ python3 scripts/check_public_hygiene.py
 - `thiserror`: typed domain, state, and provider failures.
 - `sha2`: one-way invitation verifier foundation.
 - `rusqlite` with bundled SQLite: small synchronous transactional state layer with no runtime/framework.
+- `async-trait`: narrow object-safe asynchronous read boundary shared by real and fake providers.
+- `reqwest` with Rustls: HTTPS-only real-provider reads, URL/origin validation, normal certificate verification, and bounded requests.
+- `semver`: deterministic fail-closed Headscale version classification.
+- `tokio` (tests only in this workspace): deterministic local transport, timeout, and TLS-failure tests.
 - `tempfile` (tests only): isolated restart-safe SQLite tests.
 
-No async runtime, HTTP framework, plugin system, message broker, cache, distributed consensus library, or external database is included.
+No HTTP server/framework, plugin system, message broker, cache, distributed consensus library, or external database is included. The Headscale crate is a client library only.
 
 ## Test discipline
 

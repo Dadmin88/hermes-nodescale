@@ -6,9 +6,9 @@ Nodescale owns managed membership, Nodescale device identity, roles, lifecycle, 
 
 Mesh membership is never application authorization.
 
-## N0C crates
+## Workspace crates
 
-The workspace deliberately has four crates. The domain crate is pure. State owns one SQLite database and never reads provider, Keryx, or Hermes Fleet databases. Provider models are normalized before they can enter trusted state. The fake provider is deterministic test infrastructure, not production identity evidence.
+The workspace deliberately has five crates. The domain crate is pure. State owns one SQLite database and never reads provider, Keryx, or Hermes Fleet databases. Provider models are normalized before they can enter trusted state. The fake provider is deterministic test infrastructure, not production identity evidence. The Headscale crate is an async HTTPS inspection adapter with a read-only trait that contains no mutation methods.
 
 ## Identity separation
 
@@ -26,6 +26,10 @@ The durable ordering removes application trust before relying on provider cleanu
 
 Provider outage can delay mesh cleanup but cannot preserve application authorization.
 
+## N1A provider evidence
+
+N1A adds only a stock-Headscale v0.29.3 read adapter. It can inspect version/health, list nodes, and look up one node by the provider's numeric node ID while verifying the machine-key fingerprint in the full `ProviderIdentity`. Hostname, given name, user metadata, addresses, tags, timestamps, online state, and pre-auth correlation remain observations. This adapter cannot activate membership or call any provider write route.
+
 ## Explicitly deferred
 
-No server, agent, CLI, Headscale provider, Keryx adapter, Fleet adapter, privileged helper, web console, deployment tooling, distributed consensus, or live activation exists in N0C.
+No server, agent, CLI, Keryx adapter, Fleet adapter, privileged helper, web console, deployment tooling, distributed consensus, provider mutation, invitation flow, device joining, or live activation exists in N1A.

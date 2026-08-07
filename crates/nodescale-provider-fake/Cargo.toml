@@ -7,9 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 nodescale-domain = { path = "../nodescale-domain" }
 nodescale-provider = { path = "../nodescale-provider" }
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true
