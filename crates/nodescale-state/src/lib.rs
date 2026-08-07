@@ -4,10 +4,12 @@ use chrono::{DateTime, Utc};
 use nodescale_domain::{
     AuditActor, AuditEventId, Device, DeviceGenerations, DeviceId, Generation, Invitation,
     JoinSession, JoinSessionId, JoinSessionState, MembershipState, Network, NetworkId,
-    ProviderInstanceId, ProviderKind, Revocation, RevocationState,
+    ProviderCredentialId, ProviderCredentialReference, ProviderInstanceId, ProviderKind,
+    Revocation, RevocationState,
 };
 use nodescale_provider::{
-    CompatibilityStatus, ProviderError, ProviderNode, ReadOnlyProvider, ServerInspection,
+    CompatibilityStatus, MutationPolicyMode, ProviderError, ProviderMutationCapability,
+    ProviderNode, ReadOnlyProvider, ServerInspection,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -20,9 +22,11 @@ use std::{
 };
 use thiserror::Error;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
+const MUTATION_AUTHORIZATION_MIGRATION: &str =
+    include_str!("../migrations/0003_mutation_authorization.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -49,6 +53,8 @@ pub enum StateError {
     ActivationGated,
     #[error("record not found: {0}")]
     NotFound(String),
+    #[error("mutation authorization denied: {0}")]
+    MutationAuthorizationDenied(&'static str),
 }
 
 /// TLS verification deliberately has no insecure option in N2A imports.
@@ -221,6 +227,215 @@ impl SanitizedMetadata {
     }
 }
 
+/// Owner-supplied replacement for the separately persisted mutation plane.
+/// Imports remain permanently read-only and never imply authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderMutationConfiguration {
+    provider_instance_id: ProviderInstanceId,
+    authorization_generation: Generation,
+    configuration_generation: Generation,
+    configuration_fingerprint: String,
+    adapter: String,
+    expected_version: String,
+    enabled: bool,
+    revoked: bool,
+    not_before: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    policy_mode: MutationPolicyMode,
+    capabilities: BTreeSet<ProviderMutationCapability>,
+}
+impl ProviderMutationConfiguration {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider_instance_id: ProviderInstanceId,
+        authorization_generation: Generation,
+        configuration_generation: Generation,
+        configuration_fingerprint: impl Into<String>,
+        adapter: impl Into<String>,
+        expected_version: impl Into<String>,
+        enabled: bool,
+        revoked: bool,
+        not_before: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        policy_mode: MutationPolicyMode,
+        capabilities: impl IntoIterator<Item = ProviderMutationCapability>,
+    ) -> Result<Self, StateError> {
+        let configuration_fingerprint = configuration_fingerprint.into();
+        let adapter = adapter.into();
+        let expected_version = expected_version.into();
+        let capabilities = capabilities.into_iter().collect::<BTreeSet<_>>();
+        if !valid_sha256_fingerprint(&configuration_fingerprint)
+            || adapter != "headscale"
+            || expected_version != "v0.29.3"
+            || not_before >= expires_at
+            || not_before.timestamp_millis() < 0
+            || expires_at.timestamp_millis() < 0
+            || capabilities.is_empty()
+            || (capabilities.contains(&ProviderMutationCapability::ManagePolicy)
+                && policy_mode != MutationPolicyMode::Database)
+        {
+            return Err(StateError::Conflict(
+                "invalid provider mutation configuration".into(),
+            ));
+        }
+        Ok(Self {
+            provider_instance_id,
+            authorization_generation,
+            configuration_generation,
+            configuration_fingerprint,
+            adapter,
+            expected_version,
+            enabled,
+            revoked,
+            not_before,
+            expires_at,
+            policy_mode,
+            capabilities,
+        })
+    }
+}
+
+/// Secret-free durable evidence that a provider credential creation was
+/// confirmed. The plaintext join credential is intentionally absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmedProviderCredentialReference {
+    pub credential_id: ProviderCredentialId,
+    pub network_id: NetworkId,
+    pub provider_instance_id: ProviderInstanceId,
+    pub provider_reference: ProviderCredentialReference,
+    pub authorization_generation: Generation,
+    pub configuration_generation: Generation,
+    pub configuration_fingerprint: String,
+    pub confirmed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub max_uses: u32,
+}
+impl ConfirmedProviderCredentialReference {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        credential_id: ProviderCredentialId,
+        network_id: NetworkId,
+        provider_instance_id: ProviderInstanceId,
+        provider_reference: ProviderCredentialReference,
+        authorization_generation: Generation,
+        configuration_generation: Generation,
+        configuration_fingerprint: impl Into<String>,
+        confirmed_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        max_uses: u32,
+    ) -> Result<Self, StateError> {
+        let configuration_fingerprint = configuration_fingerprint.into();
+        if !valid_sha256_fingerprint(&configuration_fingerprint)
+            || confirmed_at.timestamp_millis() < 0
+            || expires_at <= confirmed_at
+            || max_uses != 1
+        {
+            return Err(StateError::Conflict(
+                "invalid confirmed provider credential reference".into(),
+            ));
+        }
+        Ok(Self {
+            credential_id,
+            network_id,
+            provider_instance_id,
+            provider_reference,
+            authorization_generation,
+            configuration_generation,
+            configuration_fingerprint,
+            confirmed_at,
+            expires_at,
+            max_uses,
+        })
+    }
+}
+
+/// State-owned single-use real-provider authorization. Its fields are private;
+/// it deliberately has no constructor, Clone/Copy, or serde implementations.
+#[derive(Debug)]
+pub struct MutationAuthorization {
+    network_id: NetworkId,
+    provider_instance_id: ProviderInstanceId,
+    authorization_generation: Generation,
+    configuration_generation: Generation,
+    configuration_fingerprint: String,
+    adapter: String,
+    expected_version: String,
+    not_before: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    capability: ProviderMutationCapability,
+    policy_mode: MutationPolicyMode,
+}
+
+/// Runtime facts the Headscale adapter proves before any network request.
+pub struct MutationAuthorizationContext {
+    network_id: NetworkId,
+    provider_instance_id: ProviderInstanceId,
+    authorization_generation: Generation,
+    configuration_generation: Generation,
+    configuration_fingerprint: String,
+    adapter: &'static str,
+    version: String,
+    dirty: bool,
+    capability: ProviderMutationCapability,
+    policy_mode: MutationPolicyMode,
+    now: DateTime<Utc>,
+}
+impl MutationAuthorizationContext {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn headscale(
+        network_id: NetworkId,
+        provider_instance_id: ProviderInstanceId,
+        authorization_generation: Generation,
+        configuration_generation: Generation,
+        configuration_fingerprint: impl Into<String>,
+        version: impl Into<String>,
+        dirty: bool,
+        capability: ProviderMutationCapability,
+        policy_mode: MutationPolicyMode,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            network_id,
+            provider_instance_id,
+            authorization_generation,
+            configuration_generation,
+            configuration_fingerprint: configuration_fingerprint.into(),
+            adapter: "headscale",
+            version: version.into(),
+            dirty,
+            capability,
+            policy_mode,
+            now,
+        }
+    }
+}
+impl MutationAuthorization {
+    /// Consumes the token before adapter transport, preventing reuse.
+    pub fn validate(self, context: MutationAuthorizationContext) -> Result<(), StateError> {
+        if self.network_id != context.network_id
+            || self.provider_instance_id != context.provider_instance_id
+            || self.authorization_generation != context.authorization_generation
+            || self.configuration_generation != context.configuration_generation
+            || self.configuration_fingerprint != context.configuration_fingerprint
+            || self.adapter != context.adapter
+            || self.expected_version != context.version
+            || context.dirty
+            || self.capability != context.capability
+            || (self.capability == ProviderMutationCapability::ManagePolicy
+                && (self.policy_mode != MutationPolicyMode::Database
+                    || context.policy_mode != MutationPolicyMode::Database))
+            || context.now < self.not_before
+            || context.now >= self.expires_at
+        {
+            return Err(StateError::MutationAuthorizationDenied(
+                "authorization facts do not match",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct StateStore {
     connection: RefCell<Connection>,
     fail_before_audit: Cell<bool>,
@@ -253,6 +468,7 @@ impl StateStore {
                 .execute_batch(INITIAL_MIGRATION)
                 .and_then(|()| connection.pragma_update(None, "user_version", 1_u32))
                 .and_then(|()| connection.execute_batch(DISCOVERY_MIGRATION))
+                .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -267,6 +483,21 @@ impl StateStore {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
             let migration_result = connection
                 .execute_batch(DISCOVERY_MIGRATION)
+                .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 2 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result = connection
+                .execute_batch(MUTATION_AUTHORIZATION_MIGRATION)
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -443,6 +674,234 @@ impl StateStore {
             .optional()?
             .ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
         Generation::new(value).map_err(|error| StateError::Conflict(error.to_string()))
+    }
+
+    /// Atomically replace the explicit owner-controlled authorization config
+    /// and all of its capabilities. `None` expects absence; `Some` is CAS.
+    pub fn replace_provider_mutation_configuration(
+        &self,
+        network_id: NetworkId,
+        expected_authorization_generation: Option<Generation>,
+        expected_configuration_generation: Option<Generation>,
+        replacement: ProviderMutationConfiguration,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        self.transactional(|tx, store| {
+            let current = tx.query_row(
+                "SELECT provider_instance_id,authorization_generation,configuration_generation FROM provider_mutation_configurations WHERE network_id=?1",
+                [network_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, u64>(2)?)),
+            ).optional()?;
+            let current_exists = current.is_some();
+            match current {
+                None if expected_authorization_generation.is_none() && expected_configuration_generation.is_none() => {}
+                None => {
+                    let expected = expected_authorization_generation
+                        .or(expected_configuration_generation)
+                        .expect("a CAS expectation exists");
+                    return Err(StateError::StaleGeneration { expected: expected.get(), actual: 0 });
+                }
+                Some((current_provider_instance, actual_authorization, actual_configuration)) => {
+                    if current_provider_instance != replacement.provider_instance_id.to_string() {
+                        return Err(StateError::Conflict(
+                            "mutation provider identity cannot be replaced".into(),
+                        ));
+                    }
+                    if expected_authorization_generation.map(Generation::get) != Some(actual_authorization) {
+                        return Err(StateError::StaleGeneration {
+                            expected: expected_authorization_generation.map_or(0, Generation::get),
+                            actual: actual_authorization,
+                        });
+                    }
+                    if expected_configuration_generation.map(Generation::get) != Some(actual_configuration) {
+                        return Err(StateError::StaleGeneration {
+                            expected: expected_configuration_generation.map_or(0, Generation::get),
+                            actual: actual_configuration,
+                        });
+                    }
+                    if replacement.authorization_generation.get() <= actual_authorization
+                        || replacement.configuration_generation.get() <= actual_configuration
+                    {
+                        return Err(StateError::Conflict(
+                            "replacement mutation generations must advance".into(),
+                        ));
+                    }
+                }
+            }
+            let import_matches: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_imports WHERE network_id=?1 AND provider_instance_id=?2 AND read_only=1 AND mutation_allowed=0)",
+                params![network_id.to_string(), replacement.provider_instance_id.to_string()], |row| row.get(0),
+            )?;
+            if !import_matches {
+                return Err(StateError::MutationAuthorizationDenied("exact read-only import is required"));
+            }
+            let values = params![
+                network_id.to_string(), replacement.provider_instance_id.to_string(),
+                to_i64(replacement.authorization_generation)?, to_i64(replacement.configuration_generation)?,
+                replacement.configuration_fingerprint, replacement.adapter, replacement.expected_version,
+                i64::from(replacement.enabled), i64::from(replacement.revoked),
+                replacement.not_before.timestamp_millis(), replacement.expires_at.timestamp_millis(),
+                policy_mode_name(replacement.policy_mode),
+            ];
+            if current_exists {
+                tx.execute("DELETE FROM provider_mutation_capabilities WHERE network_id=?1", [network_id.to_string()])?;
+                tx.execute("UPDATE provider_mutation_configurations SET provider_instance_id=?2,authorization_generation=?3,configuration_generation=?4,configuration_fingerprint=?5,adapter=?6,expected_version=?7,enabled=?8,revoked=?9,not_before_ms=?10,expires_at_ms=?11,policy_mode=?12 WHERE network_id=?1", values)?;
+            } else {
+                tx.execute("INSERT INTO provider_mutation_configurations (network_id,provider_instance_id,authorization_generation,configuration_generation,configuration_fingerprint,adapter,expected_version,enabled,revoked,not_before_ms,expires_at_ms,policy_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", values)?;
+            }
+            for capability in replacement.capabilities {
+                tx.execute("INSERT INTO provider_mutation_capabilities (network_id,provider_instance_id,capability) VALUES (?1,?2,?3)", params![network_id.to_string(), replacement.provider_instance_id.to_string(), mutation_capability_name(capability)])?;
+            }
+            store.append_audit(tx, Some(network_id), None, actor, "provider_mutation_configured", "success", Some(replacement.authorization_generation), &SanitizedMetadata::empty())
+        })
+    }
+
+    /// Mint from current persisted v3 configuration only. A single captured
+    /// `now` drives the half-open validity check.
+    pub fn issue_mutation_authorization(
+        &self,
+        network_id: NetworkId,
+        provider_instance_id: ProviderInstanceId,
+        capability: ProviderMutationCapability,
+        now: DateTime<Utc>,
+    ) -> Result<MutationAuthorization, StateError> {
+        let connection = self.connection.borrow();
+        let row = connection.query_row(
+            "SELECT c.authorization_generation,c.configuration_generation,c.configuration_fingerprint,c.adapter,c.expected_version,c.enabled,c.revoked,c.not_before_ms,c.expires_at_ms,c.policy_mode FROM provider_mutation_configurations c JOIN provider_imports i ON i.network_id=c.network_id AND i.provider_instance_id=c.provider_instance_id WHERE c.network_id=?1 AND c.provider_instance_id=?2 AND i.read_only=1 AND i.mutation_allowed=0 AND EXISTS (SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability=?3)",
+            params![network_id.to_string(), provider_instance_id.to_string(), mutation_capability_name(capability)],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?, row.get::<_, i64>(7)?, row.get::<_, i64>(8)?, row.get::<_, String>(9)?)),
+        ).optional()?.ok_or(StateError::MutationAuthorizationDenied("no current configured capability"))?;
+        let (
+            authorization_generation,
+            configuration_generation,
+            configuration_fingerprint,
+            adapter,
+            expected_version,
+            enabled,
+            revoked,
+            not_before_ms,
+            expires_at_ms,
+            policy_mode,
+        ) = row;
+        let not_before = DateTime::from_timestamp_millis(not_before_ms).ok_or(
+            StateError::MutationAuthorizationDenied("invalid persisted not-before"),
+        )?;
+        let expires_at = DateTime::from_timestamp_millis(expires_at_ms).ok_or(
+            StateError::MutationAuthorizationDenied("invalid persisted expiry"),
+        )?;
+        if enabled != 1
+            || revoked != 0
+            || now < not_before
+            || now >= expires_at
+            || !valid_sha256_fingerprint(&configuration_fingerprint)
+            || adapter != "headscale"
+            || expected_version != "v0.29.3"
+            || (capability == ProviderMutationCapability::ManagePolicy && policy_mode != "database")
+        {
+            return Err(StateError::MutationAuthorizationDenied(
+                "configuration is not currently issuable",
+            ));
+        }
+        Ok(MutationAuthorization {
+            network_id,
+            provider_instance_id,
+            authorization_generation: generation(authorization_generation)?,
+            configuration_generation: generation(configuration_generation)?,
+            configuration_fingerprint,
+            adapter,
+            expected_version,
+            not_before,
+            expires_at,
+            capability,
+            policy_mode: parse_policy_mode(&policy_mode)?,
+        })
+    }
+
+    /// Persist only a confirmed provider-native reference. No credential
+    /// plaintext is accepted by this API or stored in this table.
+    pub fn record_confirmed_provider_credential_reference(
+        &self,
+        reference: &ConfirmedProviderCredentialReference,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        self.transactional(|tx, store| {
+            let current: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_mutation_configurations c JOIN provider_mutation_capabilities p ON p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id WHERE c.network_id=?1 AND c.provider_instance_id=?2 AND c.authorization_generation=?3 AND c.configuration_generation=?4 AND c.configuration_fingerprint=?5 AND c.enabled=1 AND c.revoked=0 AND p.capability='CreateJoinCredential' AND ?6>=c.not_before_ms AND ?6<c.expires_at_ms)",
+                params![
+                    reference.network_id.to_string(),
+                    reference.provider_instance_id.to_string(),
+                    to_i64(reference.authorization_generation)?,
+                    to_i64(reference.configuration_generation)?,
+                    reference.configuration_fingerprint,
+                    reference.confirmed_at.timestamp_millis(),
+                ],
+                |row| row.get(0),
+            )?;
+            if !current {
+                return Err(StateError::MutationAuthorizationDenied(
+                    "confirmed credential reference is not bound to current authority",
+                ));
+            }
+            tx.execute(
+                "INSERT INTO confirmed_provider_credential_references (credential_id,network_id,provider_instance_id,provider_reference,authorization_generation,configuration_generation,configuration_fingerprint,confirmed_at_ms,expires_at_ms,max_uses) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    reference.credential_id.to_string(),
+                    reference.network_id.to_string(),
+                    reference.provider_instance_id.to_string(),
+                    reference.provider_reference.as_str(),
+                    to_i64(reference.authorization_generation)?,
+                    to_i64(reference.configuration_generation)?,
+                    reference.configuration_fingerprint,
+                    reference.confirmed_at.timestamp_millis(),
+                    reference.expires_at.timestamp_millis(),
+                    i64::from(reference.max_uses),
+                ],
+            )
+            .map_err(map_constraint)?;
+            store.append_audit(
+                tx,
+                Some(reference.network_id),
+                None,
+                actor,
+                "provider_credential_reference.confirmed",
+                "success",
+                Some(reference.authorization_generation),
+                &SanitizedMetadata::empty(),
+            )
+        })
+    }
+
+    pub fn confirmed_provider_credential_reference(
+        &self,
+        credential_id: ProviderCredentialId,
+    ) -> Result<ConfirmedProviderCredentialReference, StateError> {
+        let row = self.connection.borrow().query_row(
+            "SELECT network_id,provider_instance_id,provider_reference,authorization_generation,configuration_generation,configuration_fingerprint,confirmed_at_ms,expires_at_ms,max_uses FROM confirmed_provider_credential_references WHERE credential_id=?1",
+            [credential_id.to_string()],
+            |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?, row.get::<_, u64>(4)?, row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?, row.get::<_, i64>(7)?, row.get::<_, u32>(8)?,
+            )),
+        ).optional()?.ok_or_else(|| StateError::NotFound(credential_id.to_string()))?;
+        ConfirmedProviderCredentialReference::new(
+            credential_id,
+            NetworkId::parse(&row.0).map_err(|error| StateError::Conflict(error.to_string()))?,
+            ProviderInstanceId::parse(&row.1)
+                .map_err(|error| StateError::Conflict(error.to_string()))?,
+            ProviderCredentialReference::new(row.2)
+                .map_err(|error| StateError::Conflict(error.to_string()))?,
+            generation(row.3)?,
+            generation(row.4)?,
+            row.5,
+            DateTime::from_timestamp_millis(row.6).ok_or(
+                StateError::MutationAuthorizationDenied("invalid persisted confirmation time"),
+            )?,
+            DateTime::from_timestamp_millis(row.7).ok_or(
+                StateError::MutationAuthorizationDenied("invalid persisted credential expiry"),
+            )?,
+            row.8,
+        )
     }
 
     pub fn device(&self, device_id: DeviceId) -> Result<Device, StateError> {
@@ -1227,6 +1686,41 @@ fn generation(value: u64) -> Result<Generation, StateError> {
 fn to_i64(value: Generation) -> Result<i64, StateError> {
     i64::try_from(value.get())
         .map_err(|_| StateError::Conflict("generation exceeds SQLite integer range".into()))
+}
+fn valid_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+fn mutation_capability_name(value: ProviderMutationCapability) -> &'static str {
+    match value {
+        ProviderMutationCapability::EnsureNetworkPrincipal => "EnsureNetworkPrincipal",
+        ProviderMutationCapability::CreateJoinCredential => "CreateJoinCredential",
+        ProviderMutationCapability::InvalidateJoinCredential => "InvalidateJoinCredential",
+        ProviderMutationCapability::ReplaceNodeTags => "ReplaceNodeTags",
+        ProviderMutationCapability::ExpireNode => "ExpireNode",
+        ProviderMutationCapability::DeleteNode => "DeleteNode",
+        ProviderMutationCapability::ManagePolicy => "ManagePolicy",
+    }
+}
+fn policy_mode_name(value: MutationPolicyMode) -> &'static str {
+    match value {
+        MutationPolicyMode::Database => "database",
+        MutationPolicyMode::File => "file",
+        MutationPolicyMode::Unknown => "unknown",
+    }
+}
+fn parse_policy_mode(value: &str) -> Result<MutationPolicyMode, StateError> {
+    match value {
+        "database" => Ok(MutationPolicyMode::Database),
+        "file" => Ok(MutationPolicyMode::File),
+        "unknown" => Ok(MutationPolicyMode::Unknown),
+        _ => Err(StateError::MutationAuthorizationDenied(
+            "invalid policy mode",
+        )),
+    }
 }
 fn lower(value: &str) -> String {
     value.to_ascii_lowercase()

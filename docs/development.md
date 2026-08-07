@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Stable Rust with `rustfmt` and `clippy`.
-- No live Headscale, Keryx, Hermes Fleet, Tailscale, or network access is required.
+- No live Headscale, Keryx, Hermes Fleet, Tailscale, or network access is required for the default checks.
 - SQLite is compiled through `rusqlite`'s bundled feature for reproducible CI.
 
 ## Checks
@@ -16,7 +16,8 @@ cargo test --workspace
 cargo test -p nodescale-state --test state
 cargo build --workspace
 git diff --check
-python3 scripts/check_public_hygiene.py
+TREE="$(git write-tree)"
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_public_hygiene.py --repo "$(pwd)" --tree "$TREE"
 ```
 
 ## Dependency rationale
@@ -37,4 +38,4 @@ No HTTP server/framework, plugin system, message broker, cache, distributed cons
 
 ## Test discipline
 
-Behavior changes start with a focused failing test. Pure lifecycle rules stay in `nodescale-domain`; persistence tests use temporary or in-memory Nodescale-owned databases; provider behavior uses only the deterministic fake. Live integration belongs to later separately gated phases.
+Behavior changes start with a focused failing test. Pure lifecycle rules stay in `nodescale-domain`; persistence tests use temporary or in-memory Nodescale-owned databases; provider behavior uses deterministic loopback servers and the fake provider. The ignored `disposable_provider` test is a separately gated proof that requires an exact disposable Headscale v0.29.3 HTTPS endpoint, a verified custom CA file, and a runtime API key supplied through environment variables. It must never target an existing mesh provider and is not part of default CI.

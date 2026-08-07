@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt, str::FromStr};
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DomainError {
@@ -780,24 +781,57 @@ impl InvitationSecret {
     }
 }
 
+struct SecretText(String);
+impl SecretText {
+    fn new(value: String, kind: &'static str) -> Result<Self, DomainError> {
+        if value.is_empty() {
+            Err(DomainError::InvalidValue {
+                kind,
+                reason: "must be non-empty",
+            })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    fn expose<R>(&self, f: impl for<'a> FnOnce(&'a str) -> R) -> R {
+        f(&self.0)
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn wipe(&mut self) {
+        self.0.zeroize();
+    }
+}
+impl Drop for SecretText {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+impl ZeroizeOnDrop for SecretText {}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::SecretText;
+
+    #[test]
+    fn wipe_zeroizes_the_owned_allocation_before_drop() {
+        let mut secret = SecretText::new("secret".into(), "test").unwrap();
+        secret.wipe();
+        assert_eq!(secret.expose(str::len), 0);
+    }
+}
+
 macro_rules! redacted_secret {
     ($name:ident) => {
-        #[derive(Clone)]
-        pub struct $name(String);
+        pub struct $name(SecretText);
         impl $name {
             pub fn new(value: String) -> Result<Self, DomainError> {
-                if value.is_empty() {
-                    Err(DomainError::InvalidValue {
-                        kind: stringify!($name),
-                        reason: "must be non-empty",
-                    })
-                } else {
-                    Ok(Self(value))
-                }
+                SecretText::new(value, stringify!($name)).map(Self)
             }
-            #[must_use]
-            pub fn expose_secret(&self) -> &str {
-                &self.0
+            pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a str) -> R) -> R {
+                self.0.expose(f)
             }
         }
         impl fmt::Debug for $name {
@@ -816,6 +850,45 @@ redacted_secret!(ProviderApiKey);
 redacted_secret!(ProviderJoinCredential);
 redacted_secret!(DeviceCredential);
 redacted_secret!(BindingNonce);
+
+/// Opaque provider-native credential handle. It is deliberately neither
+/// serializable nor displayable: a provider may use an integer or another
+/// implementation-specific identifier, and it must never be mistaken for a
+/// Nodescale UUID credential ID or exposed in diagnostics.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ProviderCredentialReference(String);
+impl ProviderCredentialReference {
+    pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+        let value = value.into();
+        let valid = !value.is_empty()
+            && value.len() <= 255
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+            });
+        if !valid {
+            return Err(DomainError::InvalidValue {
+                kind: "provider credential reference",
+                reason: "must be 1..=255 safe identifier characters",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl fmt::Debug for ProviderCredentialReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProviderCredentialReference([REDACTED])")
+    }
+}
+impl fmt::Display for ProviderCredentialReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Invitation {

@@ -11,14 +11,18 @@ async-trait.workspace = true
 chrono.workspace = true
 nodescale-domain = { path = "../nodescale-domain" }
 nodescale-provider = { path = "../nodescale-provider" }
-reqwest.workspace = true
+nodescale-state = { path = "../nodescale-state" }
+reqwest = { workspace = true, features = ["json"] }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 tokio.workspace = true
 
 [lints]

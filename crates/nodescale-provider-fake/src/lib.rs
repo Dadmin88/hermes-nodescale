@@ -2,17 +2,19 @@
 
 use chrono::{Duration, Utc};
 use nodescale_domain::{
-    ProviderCredentialId, ProviderIdentity, ProviderInstanceId, ProviderJoinCredential,
-    ProviderNodeId,
+    Generation, NetworkId, ProviderCredentialId, ProviderCredentialReference, ProviderIdentity,
+    ProviderInstanceId, ProviderJoinCredential, ProviderNodeId,
 };
 use nodescale_provider::{
-    CompatibilityStatus, ConditionalIdentityEvidence, JoinCredential, JoinCredentialRequest,
-    MutableIdentityEvidence, Provider, ProviderCapability, ProviderError, ProviderHealth,
-    ProviderHealthStatus, ProviderIdentityEvidence, ProviderNode, ProviderPolicy, ReadOnlyProvider,
-    ServerInspection,
+    CompatibilityStatus, ConditionalIdentityEvidence, IssuedJoinCredential, JoinCredential,
+    JoinCredentialRequest, MutableIdentityEvidence, MutationAmbiguity, MutationEvidence,
+    MutationOutcome, MutationPolicyMode, MutationProvider, MutationTags, Provider,
+    ProviderCapability, ProviderError, ProviderHealth, ProviderHealthStatus,
+    ProviderIdentityEvidence, ProviderMutation, ProviderMutationCapability, ProviderNode,
+    ProviderPolicy, ReadOnlyProvider, ServerInspection,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Mutex,
 };
 
@@ -500,14 +502,531 @@ fn deterministic_uuid(fixture: &str, sequence: u64) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in fixture.bytes().chain(sequence.to_le_bytes()) {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!(
         "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
-        hash as u32,
-        (hash >> 32) as u16,
-        ((hash >> 16) as u16) & 0x0fff,
-        (hash as u16) & 0x0fff,
+        (hash >> 32) as u32,
+        (hash >> 16) as u16,
+        (hash & 0x0fff) as u16,
+        ((hash >> 12) & 0x0fff) as u16,
         hash & 0x0000_ffff_ffff_ffff
     )
+}
+
+/// Deterministic failure points matching the mutation adapter's transport
+/// boundary. Scripts are FIFO per capability and never contain secrets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FakeMutationScript {
+    BeforeSendUnavailable,
+    BeforeSendAuthenticationFailed,
+    BeforeSendRejected,
+    AfterApplyResponseLoss,
+    AfterApplyReadBackUnavailable,
+    /// The write was accepted but authoritative readback is still old.
+    AfterApplyReadBackOld,
+    /// The write was accepted but authoritative readback conflicts.
+    AfterApplyReadBackConflict,
+}
+
+/// Sanitized deterministic mutation observation. It intentionally records no
+/// request body, credential secret, or authorization material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FakeMutationTrace {
+    pub capability: ProviderMutationCapability,
+    pub dispatched: bool,
+    pub read_back: bool,
+}
+
+/// Test-only mutation token for the deterministic fake. It is intentionally a
+/// different public type from state-owned real authorization.
+#[derive(Clone, Debug)]
+pub struct FakeMutationAuthorization {
+    network_id: NetworkId,
+    instance_id: ProviderInstanceId,
+    generation: Generation,
+    capabilities: BTreeSet<ProviderMutationCapability>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+impl FakeMutationAuthorization {
+    #[must_use]
+    pub fn new(
+        network_id: NetworkId,
+        instance_id: ProviderInstanceId,
+        generation: Generation,
+        capabilities: impl IntoIterator<Item = ProviderMutationCapability>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            network_id,
+            instance_id,
+            generation,
+            capabilities: capabilities.into_iter().collect(),
+            expires_at,
+        }
+    }
+    fn permits(
+        &self,
+        network_id: NetworkId,
+        instance_id: ProviderInstanceId,
+        generation: Generation,
+        capability: ProviderMutationCapability,
+    ) -> bool {
+        self.network_id == network_id
+            && self.instance_id == instance_id
+            && self.generation == generation
+            && self.expires_at > Utc::now()
+            && self.capabilities.contains(&capability)
+    }
+}
+
+/// Async mutation capability for deterministic tests. It is deliberately a
+/// separate wrapper, so a `FakeProvider` handed to read-only consumers cannot
+/// be used as a mutation capability.
+pub struct AsyncFakeMutationProvider {
+    provider: Mutex<FakeProvider>,
+    scripts: Mutex<BTreeMap<ProviderMutationCapability, VecDeque<FakeMutationScript>>>,
+    network_id: NetworkId,
+    generation: Generation,
+    enabled: bool,
+    policy_mode: MutationPolicyMode,
+    policy_document: Mutex<String>,
+    trace: Mutex<Vec<FakeMutationTrace>>,
+}
+impl AsyncFakeMutationProvider {
+    #[must_use]
+    pub fn new(provider: FakeProvider) -> Self {
+        Self::configured(
+            provider,
+            NetworkId::new(),
+            Generation::initial(),
+            true,
+            MutationPolicyMode::Database,
+        )
+    }
+
+    #[must_use]
+    pub fn configured(
+        provider: FakeProvider,
+        network_id: NetworkId,
+        generation: Generation,
+        enabled: bool,
+        policy_mode: MutationPolicyMode,
+    ) -> Self {
+        Self {
+            provider: Mutex::new(provider),
+            scripts: Mutex::new(BTreeMap::new()),
+            network_id,
+            generation,
+            enabled,
+            policy_mode,
+            policy_document: Mutex::new("{}".into()),
+            trace: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[must_use]
+    pub const fn network_id(&self) -> NetworkId {
+        self.network_id
+    }
+
+    pub fn script(&self, capability: ProviderMutationCapability, script: FakeMutationScript) {
+        self.scripts
+            .lock()
+            .expect("fake scripts mutex is healthy")
+            .entry(capability)
+            .or_default()
+            .push_back(script);
+    }
+
+    fn take_script(&self, capability: ProviderMutationCapability) -> Option<FakeMutationScript> {
+        self.scripts
+            .lock()
+            .expect("fake scripts mutex is healthy")
+            .get_mut(&capability)
+            .and_then(VecDeque::pop_front)
+    }
+
+    /// Ordered, sanitized observations for contract tests.
+    #[must_use]
+    pub fn mutation_trace(&self) -> Vec<FakeMutationTrace> {
+        self.trace
+            .lock()
+            .expect("fake trace mutex is healthy")
+            .clone()
+    }
+
+    #[must_use]
+    pub fn mutation_dispatch_count(&self) -> usize {
+        self.mutation_trace()
+            .iter()
+            .filter(|entry| entry.dispatched)
+            .count()
+    }
+
+    fn trace(&self, capability: ProviderMutationCapability, dispatched: bool, read_back: bool) {
+        self.trace
+            .lock()
+            .expect("fake trace mutex is healthy")
+            .push(FakeMutationTrace {
+                capability,
+                dispatched,
+                read_back,
+            });
+    }
+}
+
+#[async_trait::async_trait]
+impl MutationProvider for AsyncFakeMutationProvider {
+    type Authorization = FakeMutationAuthorization;
+
+    fn instance_id(&self) -> ProviderInstanceId {
+        Provider::instance_id(
+            &*self
+                .provider
+                .lock()
+                .expect("fake provider mutex is healthy"),
+        )
+    }
+
+    async fn execute_mutation(
+        &self,
+        authorization: Self::Authorization,
+        mutation: ProviderMutation,
+    ) -> MutationOutcome {
+        let capability = mutation.capability();
+        let actual_instance_id = self.instance_id();
+        if !self.enabled
+            || !authorization.permits(
+                self.network_id,
+                actual_instance_id,
+                self.generation,
+                capability,
+            )
+        {
+            return MutationOutcome::Rejected;
+        }
+        if matches!(mutation, ProviderMutation::ApplyPolicy { .. })
+            && !matches!(self.policy_mode, MutationPolicyMode::Database)
+        {
+            return MutationOutcome::Unsupported;
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .expect("fake provider mutex is healthy");
+        let inspection = match Provider::inspect_server(&*provider) {
+            Ok(inspection) => inspection,
+            Err(error) => return mutation_error_outcome(error),
+        };
+        if !inspection.compatibility.allows_mutation() || !inspection.mutation_allowed {
+            return MutationOutcome::CompatibilityBlocked;
+        }
+        let after_apply_script = match self.take_script(capability) {
+            Some(FakeMutationScript::BeforeSendUnavailable) => {
+                return MutationOutcome::Unavailable;
+            }
+            Some(FakeMutationScript::BeforeSendAuthenticationFailed) => {
+                return MutationOutcome::AuthenticationFailed;
+            }
+            Some(FakeMutationScript::BeforeSendRejected) => return MutationOutcome::Rejected,
+            script @ Some(
+                FakeMutationScript::AfterApplyResponseLoss
+                | FakeMutationScript::AfterApplyReadBackUnavailable
+                | FakeMutationScript::AfterApplyReadBackOld
+                | FakeMutationScript::AfterApplyReadBackConflict,
+            ) => script,
+            None => None,
+        };
+        let response_loss = matches!(
+            after_apply_script,
+            Some(FakeMutationScript::AfterApplyResponseLoss)
+        );
+        let readback_unavailable = matches!(
+            after_apply_script,
+            Some(FakeMutationScript::AfterApplyReadBackUnavailable)
+        );
+        let readback_old = matches!(
+            after_apply_script,
+            Some(FakeMutationScript::AfterApplyReadBackOld)
+        );
+        let readback_conflict = matches!(
+            after_apply_script,
+            Some(FakeMutationScript::AfterApplyReadBackConflict)
+        );
+        self.trace(capability, true, !readback_unavailable);
+        match mutation {
+            ProviderMutation::EnsureNetworkPrincipal { principal } => {
+                let already = provider.principals.contains(&principal);
+                if let Err(error) = Provider::ensure_network_principal(&mut *provider, &principal) {
+                    return mutation_error_outcome(error);
+                }
+                if readback_unavailable {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    };
+                }
+                if readback_old {
+                    return MutationOutcome::Failed { retryable: true };
+                }
+                if readback_conflict {
+                    return MutationOutcome::Conflict;
+                }
+                // Principal membership is the authoritative local fake read-back.
+                if provider.principals.contains(&principal) {
+                    let evidence = MutationEvidence::PrincipalPresent {
+                        provider_user_id: principal.clone(),
+                        principal,
+                    };
+                    if already {
+                        MutationOutcome::AlreadySatisfied { evidence }
+                    } else {
+                        MutationOutcome::Confirmed { evidence }
+                    }
+                } else if response_loss {
+                    MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    }
+                } else {
+                    MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyApplied,
+                    }
+                }
+            }
+            ProviderMutation::CreateJoinCredential { request } => {
+                let credential = match Provider::create_join_credential(&mut *provider, &request) {
+                    Ok(credential) => credential,
+                    Err(error) => return mutation_error_outcome(error),
+                };
+                if readback_unavailable {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    };
+                }
+                // A response loss or unconfirmable post-state cannot safely
+                // deliver the only plaintext credential.
+                if response_loss || readback_old || readback_conflict {
+                    MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                    }
+                } else {
+                    let issued = IssuedJoinCredential {
+                        provider_reference: ProviderCredentialReference::new(
+                            credential.credential_id.to_string(),
+                        )
+                        .expect("fake credential UUID is a safe reference"),
+                        secret: credential.secret,
+                        expires_at: credential.expires_at,
+                        max_uses: credential.max_uses,
+                    };
+                    MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::JoinCredentialIssued(issued),
+                    }
+                }
+            }
+            ProviderMutation::RevokeJoinCredential { credential } => {
+                let credential_id = match ProviderCredentialId::parse(credential.as_str()) {
+                    Ok(credential_id) => credential_id,
+                    Err(_) => return MutationOutcome::Rejected,
+                };
+                let result = Provider::revoke_join_credential(&mut *provider, credential_id);
+                match result {
+                    Ok(()) if readback_unavailable => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                    Ok(()) if readback_old => MutationOutcome::Failed { retryable: true },
+                    Ok(()) if readback_conflict => MutationOutcome::Conflict,
+                    Ok(()) => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::CredentialRevoked { credential },
+                    },
+                    Err(error) => mutation_error_outcome(error),
+                }
+            }
+            ProviderMutation::ReplaceNodeTags { target, tags } => {
+                let tags = match MutationTags::new(tags) {
+                    Ok(tags) => tags,
+                    Err(_) => return MutationOutcome::Rejected,
+                };
+                let before = match Provider::get_node(&*provider, &target) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => return MutationOutcome::Rejected,
+                    Err(error) => return mutation_error_outcome(error),
+                };
+                if before.tags == *tags.as_set() {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::NodeMatches(before),
+                    };
+                }
+                let values = tags.as_set().iter().cloned().collect::<Vec<_>>();
+                if let Err(error) = Provider::set_node_tags(&mut *provider, &target, &values) {
+                    return mutation_error_outcome(error);
+                }
+                if readback_unavailable {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    };
+                }
+                if readback_old {
+                    return MutationOutcome::Failed { retryable: true };
+                }
+                if readback_conflict {
+                    return MutationOutcome::Conflict;
+                }
+                match Provider::get_node(&*provider, &target) {
+                    Ok(Some(node)) if node.tags == *tags.as_set() => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::NodeMatches(node),
+                    },
+                    Ok(_) if response_loss => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                    Ok(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyApplied,
+                    },
+                    Err(error) => mutation_error_outcome(error),
+                }
+            }
+            ProviderMutation::ExpireNode { target } => {
+                let before = match Provider::get_node(&*provider, &target) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => return MutationOutcome::Rejected,
+                    Err(error) => return mutation_error_outcome(error),
+                };
+                if before.expired {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::NodeMatches(before),
+                    };
+                }
+                if let Err(error) = Provider::expire_node(&mut *provider, &target) {
+                    return mutation_error_outcome(error);
+                }
+                if readback_unavailable {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    };
+                }
+                if readback_old {
+                    return MutationOutcome::Failed { retryable: true };
+                }
+                if readback_conflict {
+                    return MutationOutcome::Conflict;
+                }
+                match Provider::get_node(&*provider, &target) {
+                    Ok(Some(node)) if node.expired => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::NodeMatches(node),
+                    },
+                    Ok(_) if response_loss => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                    Ok(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyApplied,
+                    },
+                    Err(error) => mutation_error_outcome(error),
+                }
+            }
+            ProviderMutation::DeleteNode { target } => {
+                let before = match Provider::get_node(&*provider, &target) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return MutationOutcome::AlreadySatisfied {
+                            evidence: MutationEvidence::NodeAbsent { target },
+                        };
+                    }
+                    Err(error) => return mutation_error_outcome(error),
+                };
+                if before.identity != target {
+                    return MutationOutcome::Conflict;
+                }
+                if let Err(error) = Provider::delete_node(&mut *provider, &target) {
+                    return mutation_error_outcome(error);
+                }
+                if readback_unavailable {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    };
+                }
+                if readback_old {
+                    return MutationOutcome::Failed { retryable: true };
+                }
+                if readback_conflict {
+                    return MutationOutcome::Conflict;
+                }
+                match Provider::get_node(&*provider, &target) {
+                    Ok(None) => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::NodeAbsent { target },
+                    },
+                    Ok(_) if response_loss => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                    Ok(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyApplied,
+                    },
+                    Err(error) => mutation_error_outcome(error),
+                }
+            }
+            ProviderMutation::ApplyPolicy {
+                expected_revision,
+                policy,
+            } => {
+                let mut document = self
+                    .policy_document
+                    .lock()
+                    .expect("fake policy mutex is healthy");
+                let before_revision = fake_policy_revision(&document);
+                if before_revision != expected_revision {
+                    return MutationOutcome::Conflict;
+                }
+                if *document == policy {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::PolicyMatches {
+                            revision: before_revision,
+                        },
+                    };
+                }
+                *document = policy;
+                if readback_unavailable {
+                    MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    }
+                } else if readback_old || readback_conflict {
+                    MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyApplied,
+                    }
+                } else {
+                    MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::PolicyMatches {
+                            revision: fake_policy_revision(&document),
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Stable, dependency-free digest suitable only for fake-test policy revisions.
+#[must_use]
+pub fn fake_policy_revision(policy: &str) -> String {
+    let hash = policy
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    format!("fake-policy-{hash:016x}")
+}
+
+fn mutation_error_outcome(error: ProviderError) -> MutationOutcome {
+    match error {
+        ProviderError::AuthenticationFailed => MutationOutcome::AuthenticationFailed,
+        ProviderError::Timeout | ProviderError::TlsFailure | ProviderError::Unreachable(_) => {
+            MutationOutcome::Unavailable
+        }
+        ProviderError::Unsupported(_) => MutationOutcome::Unsupported,
+        ProviderError::Conflict(_) => MutationOutcome::Conflict,
+        ProviderError::AmbiguousMutation(_) => MutationOutcome::Ambiguous {
+            reason: MutationAmbiguity::PotentiallyApplied,
+        },
+        ProviderError::Rejected(_) | ProviderError::MalformedResponse(_) => {
+            MutationOutcome::Rejected
+        }
+    }
 }

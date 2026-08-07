@@ -32,5 +32,9 @@ jobs:
         run: cargo build --workspace
       - name: Diff hygiene
         run: git diff --check
+      - name: Public repository hygiene fixtures
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts/tests/test_check_public_hygiene.py
       - name: Public repository hygiene
-        run: python3 scripts/check_public_hygiene.py
+        run: |
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          python3 scripts/check_public_hygiene.py --repo "$GITHUB_WORKSPACE" --tree "$tree"

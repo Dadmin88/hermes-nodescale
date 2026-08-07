@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use nodescale_domain::{
-    ProviderCredentialId, ProviderIdentity, ProviderInstanceId, ProviderJoinCredential,
+    ProviderCredentialId, ProviderCredentialReference, ProviderIdentity, ProviderInstanceId,
+    ProviderJoinCredential,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,6 +95,10 @@ pub struct JoinCredentialRequest {
     pub principal: String,
     pub reusable: bool,
     pub max_uses: u32,
+    /// Empty means the adapter must select its explicit 15-minute default.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Requested Headscale ACL tags. The adapter applies the closed vocabulary.
+    pub tags: BTreeSet<String>,
 }
 impl JoinCredentialRequest {
     #[must_use]
@@ -102,6 +107,8 @@ impl JoinCredentialRequest {
             principal: principal.into(),
             reusable: false,
             max_uses: 1,
+            expires_at: None,
+            tags: BTreeSet::new(),
         }
     }
 }
@@ -306,4 +313,239 @@ pub trait Provider {
     fn get_policy(&self) -> Result<ProviderPolicy, ProviderError>;
     fn apply_policy(&mut self, policy: &ProviderPolicy) -> Result<(), ProviderError>;
     fn provider_health(&self) -> Result<ProviderHealth, ProviderError>;
+}
+
+/// Mutations are separately capability-scoped and never widen `ReadOnlyProvider`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderMutationCapability {
+    EnsureNetworkPrincipal,
+    CreateJoinCredential,
+    InvalidateJoinCredential,
+    ReplaceNodeTags,
+    ExpireNode,
+    DeleteNode,
+    ManagePolicy,
+}
+
+/// Trusted configuration provenance for the provider policy storage mode.
+/// `Unknown` is intentionally fail-closed for policy writes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MutationPolicyMode {
+    Database,
+    File,
+    Unknown,
+}
+
+/// Validated, sorted Headscale tag collection. A BTreeSet makes request and
+/// read-back comparison deterministic without allowing unsafe tag spellings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MutationTags(BTreeSet<String>);
+impl MutationTags {
+    pub fn new(tags: impl IntoIterator<Item = String>) -> Result<Self, ProviderError> {
+        let tags = tags.into_iter().collect::<BTreeSet<_>>();
+        const ALLOWED: [&str; 6] = [
+            "tag:nodescale-node",
+            "tag:nodescale-worker",
+            "tag:nodescale-controller",
+            "tag:nodescale-profile-host",
+            "tag:nodescale-observer",
+            "tag:nodescale-admin",
+        ];
+        if tags.is_empty()
+            || tags.len() > 4
+            || tags.iter().any(|tag| !ALLOWED.contains(&tag.as_str()))
+        {
+            return Err(ProviderError::Rejected("invalid mutation tags".into()));
+        }
+        Ok(Self(tags))
+    }
+    #[must_use]
+    pub fn as_set(&self) -> &BTreeSet<String> {
+        &self.0
+    }
+}
+
+pub enum ProviderMutation {
+    EnsureNetworkPrincipal {
+        principal: String,
+    },
+    CreateJoinCredential {
+        request: JoinCredentialRequest,
+    },
+    RevokeJoinCredential {
+        credential: ProviderCredentialReference,
+    },
+    ReplaceNodeTags {
+        target: ProviderIdentity,
+        tags: BTreeSet<String>,
+    },
+    ExpireNode {
+        target: ProviderIdentity,
+    },
+    DeleteNode {
+        target: ProviderIdentity,
+    },
+    ApplyPolicy {
+        expected_revision: String,
+        policy: String,
+    },
+}
+impl ProviderMutation {
+    #[must_use]
+    pub const fn capability(&self) -> ProviderMutationCapability {
+        match self {
+            Self::EnsureNetworkPrincipal { .. } => {
+                ProviderMutationCapability::EnsureNetworkPrincipal
+            }
+            Self::CreateJoinCredential { .. } => ProviderMutationCapability::CreateJoinCredential,
+            Self::RevokeJoinCredential { .. } => {
+                ProviderMutationCapability::InvalidateJoinCredential
+            }
+            Self::ReplaceNodeTags { .. } => ProviderMutationCapability::ReplaceNodeTags,
+            Self::ExpireNode { .. } => ProviderMutationCapability::ExpireNode,
+            Self::DeleteNode { .. } => ProviderMutationCapability::DeleteNode,
+            Self::ApplyPolicy { .. } => ProviderMutationCapability::ManagePolicy,
+        }
+    }
+}
+
+/// Sanitized evidence is required for every confirmed or already-satisfied
+/// mutation. It deliberately contains no API or join credential secret.
+pub struct IssuedJoinCredential {
+    pub provider_reference: ProviderCredentialReference,
+    pub secret: ProviderJoinCredential,
+    pub expires_at: DateTime<Utc>,
+    pub max_uses: u32,
+}
+impl std::fmt::Debug for IssuedJoinCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssuedJoinCredential")
+            .field("provider_reference", &self.provider_reference)
+            .field("secret", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("max_uses", &self.max_uses)
+            .finish()
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum MutationEvidence {
+    PrincipalPresent {
+        principal: String,
+        /// Stable provider-native principal ID observed through authoritative
+        /// readback. Display names are not identity evidence.
+        provider_user_id: String,
+    },
+    JoinCredentialIssued(IssuedJoinCredential),
+    CredentialRevoked {
+        credential: ProviderCredentialReference,
+    },
+    NodeMatches(ProviderNode),
+    NodeAbsent {
+        target: ProviderIdentity,
+    },
+    PolicyMatches {
+        revision: String,
+    },
+}
+impl std::fmt::Debug for MutationEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PrincipalPresent {
+                principal,
+                provider_user_id,
+            } => f
+                .debug_struct("PrincipalPresent")
+                .field("principal", principal)
+                .field("provider_user_id", provider_user_id)
+                .finish(),
+            Self::JoinCredentialIssued(credential) => f
+                .debug_tuple("JoinCredentialIssued")
+                .field(credential)
+                .finish(),
+            Self::CredentialRevoked { credential } => f
+                .debug_tuple("CredentialRevoked")
+                .field(credential)
+                .finish(),
+            Self::NodeMatches(node) => f.debug_tuple("NodeMatches").field(node).finish(),
+            Self::NodeAbsent { target } => f.debug_tuple("NodeAbsent").field(target).finish(),
+            Self::PolicyMatches { revision } => {
+                f.debug_tuple("PolicyMatches").field(revision).finish()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationAmbiguity {
+    PotentiallyApplied,
+    PotentiallyAppliedSecretUnavailable,
+    ReadBackUnavailable,
+}
+
+pub enum MutationOutcome {
+    Confirmed { evidence: MutationEvidence },
+    AlreadySatisfied { evidence: MutationEvidence },
+    Rejected,
+    Failed { retryable: bool },
+    Unsupported,
+    AuthenticationFailed,
+    Unavailable,
+    CompatibilityBlocked,
+    Conflict,
+    Ambiguous { reason: MutationAmbiguity },
+}
+impl std::fmt::Debug for MutationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Confirmed { evidence } => f
+                .debug_struct("Confirmed")
+                .field("evidence", evidence)
+                .finish(),
+            Self::AlreadySatisfied { evidence } => f
+                .debug_struct("AlreadySatisfied")
+                .field("evidence", evidence)
+                .finish(),
+            Self::Rejected => f.write_str("Rejected"),
+            Self::Failed { retryable } => f
+                .debug_struct("Failed")
+                .field("retryable", retryable)
+                .finish(),
+            Self::Unsupported => f.write_str("Unsupported"),
+            Self::AuthenticationFailed => f.write_str("AuthenticationFailed"),
+            Self::Unavailable => f.write_str("Unavailable"),
+            Self::CompatibilityBlocked => f.write_str("CompatibilityBlocked"),
+            Self::Conflict => f.write_str("Conflict"),
+            Self::Ambiguous { reason } => {
+                f.debug_struct("Ambiguous").field("reason", reason).finish()
+            }
+        }
+    }
+}
+
+/// The async mutation plane is intentionally a sibling of `ReadOnlyProvider`.
+/// A caller must receive this explicitly constructed capability to issue writes.
+///
+/// ```compile_fail
+/// use nodescale_provider::{MutationProvider, ReadOnlyProvider};
+/// fn requires_mutation<T: MutationProvider>() {}
+/// fn read_only_is_not_mutation<T: ReadOnlyProvider>() {
+///     requires_mutation::<T>();
+/// }
+/// ```
+#[async_trait::async_trait]
+pub trait MutationProvider: Send + Sync {
+    /// An authorization is provider-specific and consumed exactly once by the
+    /// mutation call. A real adapter can therefore require a state-owned token
+    /// while deterministic fakes retain a deliberately incompatible test token.
+    type Authorization: Send;
+
+    fn instance_id(&self) -> ProviderInstanceId;
+    async fn execute_mutation(
+        &self,
+        authorization: Self::Authorization,
+        mutation: ProviderMutation,
+    ) -> MutationOutcome;
 }

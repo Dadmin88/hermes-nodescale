@@ -368,52 +368,6 @@ async fn duplicate_snapshot_and_failpoint_fail_closed_without_partial_inventory(
     );
 }
 
-#[tokio::test]
-async fn sanitized_headscale_fixture_uses_real_parser_then_same_reconciler() {
-    let store = StateStore::open_in_memory().unwrap();
-    let instance = ProviderInstanceId::new();
-    let network = Network::new(
-        NetworkId::new(),
-        "fixture-proof",
-        ProviderKind::Headscale,
-        instance,
-        now(),
-    )
-    .unwrap();
-    let source = provider(instance);
-    *source.nodes.lock().unwrap() = nodescale_provider_headscale::parse_nodes_fixture(
-        include_str!("../../nodescale-provider-headscale/fixtures/v0.29.3-nodes.json"),
-        instance,
-        now(),
-    )
-    .unwrap();
-    store
-        .import_headscale_network(
-            &network,
-            &config(instance),
-            &source,
-            now(),
-            AuditActor::system(),
-        )
-        .await
-        .unwrap();
-    let report = store
-        .reconcile_read_only(network.network_id, &source, now(), AuditActor::system())
-        .await
-        .unwrap();
-    assert_eq!(report.discovered_unmanaged_count, 2);
-    assert!(
-        store
-            .provider_observations(network.network_id)
-            .unwrap()
-            .iter()
-            .all(
-                |node| node.classification == ObservationClassification::DiscoveredUnmanaged
-                    && node.device_id.is_none()
-            )
-    );
-}
-
 #[test]
 fn invalid_network_name_and_plaintext_provider_secret_are_rejected() {
     let instance = ProviderInstanceId::new();

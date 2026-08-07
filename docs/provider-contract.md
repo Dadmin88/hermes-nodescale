@@ -22,15 +22,54 @@ N1A expands `ProviderNode` with separately typed identity evidence, conditional 
 - exact node lookup;
 - provider health.
 
-It contains no write method. The Headscale N1A adapter implements only this boundary. The older deterministic `Provider` trait remains the N0C future-operation simulator used by the fake provider; it is not implemented by the real Headscale adapter.
+It contains no write method. The Headscale read adapter remains on this boundary. `MutationProvider` is separate, consumes an associated authorization type by value, and is implemented by the fake and Headscale mutation adapters. The older deterministic `Provider` trait remains the N0C simulator.
 
 Compatibility and operation mode are separate gates. `CompatibilityReport::from_inspection` requires both a compatible status and explicit adapter mutation permission. Unknown compatibility, read-only degraded mode, or a read-only adapter can never gain mutation authority merely because a server exposes write routes.
 
 ## Capability truth
 
-Provider capability observations are explicit operations, not broad role-derived authority. A provider reports only operations it can safely perform in its current mode. N1A Headscale reports inspection, list, exact lookup, and health. It never reports join-credential, node mutation, or policy capability, and always reports `mutation_allowed = false`.
+Provider capability observations are explicit operations, not broad role-derived authority. The read-only Headscale adapter reports inspection, list, exact lookup, and health and always reports `mutation_allowed = false`. Mutation capabilities are persisted separately and authorized one operation at a time.
 
-Future mutation operations remain gated behind exact known compatibility and a separately authorized adapter phase. Unsupported operations must return `ProviderError::Unsupported`; they must never return apparent success. Ambiguous write outcomes must remain explicit and require later reconciliation.
+Mutation operations are gated behind exact known compatibility, explicit state configuration, and a state-issued single-use authorization. Unsupported operations never return apparent success. Ambiguous write outcomes remain explicit and require containment or later reconciliation.
+
+## N3A mutation contract
+
+The authorized adapter exposes these operations independently only after proving an
+authenticated runtime reports the exact clean pin `version == "v0.29.3"` and
+`dirty == false`, and after verifying explicit mutation-enabled configuration
+for the exact network/provider instance. Dirty, malformed, prerelease,
+build-suffixed, future, unsupported, unreachable, authentication-failing, or
+read-only runtime evidence fails closed:
+
+| Capability | Bounded operation | Required boundary |
+| --- | --- | --- |
+| `EnsureNetworkPrincipal` | Ensure one explicitly named provider principal. | Principal admission only; it neither creates Nodescale identity nor grants application authority. |
+| `CreateJoinCredential` / `InvalidateJoinCredential` | Create a credential for that principal with explicit expiry and bounded use count; invalidate by its exact provider credential ID. | The returned plaintext is one-time delivery material, never ordinary persistence, audit, diagnostics, or retry input. |
+| `ReplaceNodeTags` | Replace tags with the complete requested tag set for one exact `ProviderIdentity`. | Tags remain mutable provider policy metadata, never identity or Fleet authorization. |
+| `ExpireNode` / `DeleteNode` | Expire or delete one exact `ProviderIdentity`. | Identity must be re-read and match before and, where observable, after mutation. |
+| `ManagePolicy` | Read, check, and replace provider policy. | Available only with explicit trusted `database` policy mode and isolated proof; no generic HTTP route, response shape, `updatedAt`, or version inference authorizes policy mutation. |
+
+Capability advertisement must remain operation-specific: a compatible server,
+an enabled mutation mode, or one authorized operation does not authorize any
+other row. The provider contract has no compare-and-swap (CAS) primitive, so the
+provider must not promise CAS semantics. A write response alone is not a
+certain outcome. Record `rejected`, `unsupported`, or `ambiguous` distinctly;
+report a requested state as applied or already satisfied only after an
+authoritative read-back where the provider makes one possible. An ambiguous
+credential creation is never treated as a usable credential, is never recorded
+as confirmed, and requires containment/reconciliation rather than blind retry.
+
+The Headscale adapter checks authorization before any network request. Every
+possibly dispatched non-credential mutation performs exactly one final
+reconciliation read. Credential creation performs no blind retry; uncertainty
+is terminally ambiguous. Policy mutation is available only in configured
+database mode, performs at most one PUT, and performs exactly one final GET
+after possible dispatch. File and unknown policy modes perform zero traffic and
+return `Unsupported`.
+
+None of these provider effects creates trusted Nodescale membership, verifies
+a Keryx binding, or activates Hermes Fleet enrollment, grants, scheduling, or
+execution.
 
 ## Health and errors
 

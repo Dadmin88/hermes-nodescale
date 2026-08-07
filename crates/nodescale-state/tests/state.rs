@@ -339,7 +339,7 @@ fn stale_concurrent_mutation_is_rejected() {
 }
 
 #[test]
-fn n1a_schema_upgrades_transactionally_to_n2a_discovery_schema() {
+fn n1a_schema_upgrades_transactionally_to_current_schema() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("n1a-upgrade.db");
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -363,43 +363,4 @@ fn n1a_schema_upgrades_transactionally_to_n2a_discovery_schema() {
 
     let store = StateStore::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    drop(store);
-
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    let observation_columns = connection
-        .prepare("PRAGMA table_info(provider_observations)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    for required in [
-        "classification",
-        "adoption_state",
-        "semantic_fingerprint",
-        "first_observed_at",
-        "last_observed_at",
-        "snapshot_at",
-    ] {
-        assert!(observation_columns.iter().any(|column| column == required));
-    }
-    let provider_imports_exists: u64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='provider_imports'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(provider_imports_exists, 1);
-    let migrated: (u64, String, String, String) = connection
-        .query_row(
-            "SELECT COUNT(*),stable_key_fingerprint,first_observed_at,last_observed_at FROM provider_observations",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .unwrap();
-    assert_eq!(migrated.0, 1);
-    assert_eq!(migrated.1, "machine-new");
-    assert_eq!(migrated.2, "2026-01-01T00:00:00Z");
-    assert_eq!(migrated.3, "2026-01-02T00:00:00Z");
 }

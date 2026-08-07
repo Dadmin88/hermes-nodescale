@@ -1,22 +1,32 @@
 //! Strictly read-only stock Headscale provider adapter.
 
 use chrono::{DateTime, Utc};
-use nodescale_domain::{ProviderApiKey, ProviderIdentity, ProviderInstanceId, ProviderNodeId};
+use nodescale_domain::{
+    Generation, NetworkId, ProviderApiKey, ProviderCredentialReference, ProviderIdentity,
+    ProviderInstanceId, ProviderJoinCredential, ProviderNodeId,
+};
 use nodescale_provider::{
-    CompatibilityReport, CompatibilityStatus, ConditionalIdentityEvidence, MutableIdentityEvidence,
-    PreAuthAssociationStrength, PreAuthCorrelationObservation, ProviderCapability, ProviderError,
-    ProviderHealth, ProviderHealthStatus, ProviderIdentityEvidence, ProviderNode,
+    CompatibilityReport, CompatibilityStatus, ConditionalIdentityEvidence, IssuedJoinCredential,
+    MutableIdentityEvidence, MutationAmbiguity, MutationEvidence, MutationOutcome,
+    MutationPolicyMode, MutationProvider, MutationTags, PreAuthAssociationStrength,
+    PreAuthCorrelationObservation, ProviderCapability, ProviderError, ProviderHealth,
+    ProviderHealthStatus, ProviderIdentityEvidence, ProviderMutation, ProviderNode,
     ProviderUserObservation, ReadOnlyProvider, ServerInspection,
 };
+use nodescale_state::{MutationAuthorization, MutationAuthorizationContext};
 use reqwest::{Client, StatusCode, Url};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, fmt, time::Duration};
+use std::{collections::BTreeSet, fmt, io::Read, path::PathBuf, time::Duration};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Exact upstream release contract verified for N1A.
 pub const PINNED_HEADSCALE_VERSION: &str = "0.29.3";
+/// Exact, sanitized fallback for policy modes other than Headscale's official
+/// database policy mode. File mode intentionally remains mutation-disabled.
+pub const POLICY_MUTATION_UNSUPPORTED: &str = "policy mutation unsupported";
 const MAX_HEADSCALE_NODES: usize = 10_000;
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -27,6 +37,14 @@ pub enum HeadscaleError {
     InvalidEndpoint(&'static str),
     #[error("failed to construct Headscale HTTP client")]
     ClientConstruction,
+    #[error("custom root CA could not be read")]
+    CustomRootCaUnreadable,
+    #[error("custom root CA exceeds configured bound")]
+    CustomRootCaTooLarge,
+    #[error("custom root CA must contain exactly one PEM certificate")]
+    CustomRootCaMalformed,
+    #[error("custom root certificate is not a certificate authority")]
+    CustomRootCaNotCertificateAuthority,
 }
 
 /// Classify only the exact verified release as fully compatible.
@@ -51,6 +69,22 @@ pub fn classify_version(raw: &str) -> Result<CompatibilityStatus, HeadscaleError
     }
 }
 
+pub const MAX_CUSTOM_ROOT_CA_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum HeadscaleCustomRootCa {
+    PemBytes(Vec<u8>),
+    PemFile(PathBuf),
+}
+impl fmt::Debug for HeadscaleCustomRootCa {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::PemBytes(_) => "HeadscaleCustomRootCa::PemBytes([REDACTED])",
+            Self::PemFile(_) => "HeadscaleCustomRootCa::PemFile([REDACTED])",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeadscaleClientOptions {
     pub connect_timeout: Duration,
@@ -66,6 +100,73 @@ impl Default for HeadscaleClientOptions {
             max_response_bytes: 2 * 1024 * 1024,
         }
     }
+}
+
+fn read_custom_root_ca(source: HeadscaleCustomRootCa) -> Result<Vec<u8>, HeadscaleError> {
+    match source {
+        HeadscaleCustomRootCa::PemBytes(bytes) => {
+            if bytes.len() > MAX_CUSTOM_ROOT_CA_BYTES {
+                return Err(HeadscaleError::CustomRootCaTooLarge);
+            }
+            if bytes.is_empty() {
+                return Err(HeadscaleError::CustomRootCaMalformed);
+            }
+            Ok(bytes)
+        }
+        HeadscaleCustomRootCa::PemFile(path) => {
+            let metadata =
+                std::fs::metadata(&path).map_err(|_| HeadscaleError::CustomRootCaUnreadable)?;
+            if !metadata.is_file() {
+                return Err(HeadscaleError::CustomRootCaUnreadable);
+            }
+            if metadata.len() > MAX_CUSTOM_ROOT_CA_BYTES as u64 {
+                return Err(HeadscaleError::CustomRootCaTooLarge);
+            }
+            let file =
+                std::fs::File::open(path).map_err(|_| HeadscaleError::CustomRootCaUnreadable)?;
+            let mut bytes = Vec::new();
+            file.take((MAX_CUSTOM_ROOT_CA_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|_| HeadscaleError::CustomRootCaUnreadable)?;
+            if bytes.len() > MAX_CUSTOM_ROOT_CA_BYTES {
+                return Err(HeadscaleError::CustomRootCaTooLarge);
+            }
+            if bytes.is_empty() {
+                return Err(HeadscaleError::CustomRootCaMalformed);
+            }
+            Ok(bytes)
+        }
+    }
+}
+
+fn validated_custom_root(pem_bytes: &[u8]) -> Result<reqwest::Certificate, HeadscaleError> {
+    use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
+
+    let trimmed = pem_bytes
+        .strip_prefix(&[])
+        .unwrap_or(pem_bytes)
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map(|start| &pem_bytes[start..])
+        .ok_or(HeadscaleError::CustomRootCaMalformed)?;
+    let (remaining, pem) =
+        parse_x509_pem(trimmed).map_err(|_| HeadscaleError::CustomRootCaMalformed)?;
+    if pem.label != "CERTIFICATE" || remaining.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        return Err(HeadscaleError::CustomRootCaMalformed);
+    }
+    let (der_remaining, certificate) =
+        parse_x509_certificate(&pem.contents).map_err(|_| HeadscaleError::CustomRootCaMalformed)?;
+    if !der_remaining.is_empty() {
+        return Err(HeadscaleError::CustomRootCaMalformed);
+    }
+    let is_ca = certificate
+        .basic_constraints()
+        .map_err(|_| HeadscaleError::CustomRootCaMalformed)?
+        .is_some_and(|constraints| constraints.value.ca);
+    if !is_ca {
+        return Err(HeadscaleError::CustomRootCaNotCertificateAuthority);
+    }
+    reqwest::Certificate::from_pem(trimmed).map_err(|_| HeadscaleError::CustomRootCaMalformed)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -126,7 +227,24 @@ impl HeadscaleProvider {
         api_key: ProviderApiKey,
         options: HeadscaleClientOptions,
     ) -> Result<Self, HeadscaleError> {
-        Self::build(endpoint, instance_id, api_key, options, false)
+        Self::build(endpoint, instance_id, api_key, options, false, None)
+    }
+
+    pub fn new_with_custom_root_ca(
+        endpoint: &str,
+        instance_id: ProviderInstanceId,
+        api_key: ProviderApiKey,
+        options: HeadscaleClientOptions,
+        custom_root_ca: HeadscaleCustomRootCa,
+    ) -> Result<Self, HeadscaleError> {
+        Self::build(
+            endpoint,
+            instance_id,
+            api_key,
+            options,
+            false,
+            Some(custom_root_ca),
+        )
     }
 
     #[cfg(test)]
@@ -136,7 +254,7 @@ impl HeadscaleProvider {
         api_key: ProviderApiKey,
         options: HeadscaleClientOptions,
     ) -> Result<Self, HeadscaleError> {
-        Self::build(endpoint, instance_id, api_key, options, true)
+        Self::build(endpoint, instance_id, api_key, options, true, None)
     }
 
     fn build(
@@ -145,6 +263,7 @@ impl HeadscaleProvider {
         api_key: ProviderApiKey,
         options: HeadscaleClientOptions,
         allow_http_for_test: bool,
+        custom_root_ca: Option<HeadscaleCustomRootCa>,
     ) -> Result<Self, HeadscaleError> {
         let mut endpoint = Url::parse(endpoint)
             .map_err(|_| HeadscaleError::InvalidEndpoint("must be an absolute URL"))?;
@@ -171,10 +290,16 @@ impl HeadscaleProvider {
             ));
         }
         endpoint.set_path("/");
-        let client = Client::builder()
+        let mut client_builder = Client::builder()
             .connect_timeout(options.connect_timeout)
             .timeout(options.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(custom_root_ca) = custom_root_ca {
+            let root_pem = read_custom_root_ca(custom_root_ca)?;
+            let root = validated_custom_root(&root_pem)?;
+            client_builder = client_builder.add_root_certificate(root);
+        }
+        let client = client_builder
             .build()
             .map_err(|_| HeadscaleError::ClientConstruction)?;
         Ok(Self {
@@ -264,7 +389,7 @@ impl HeadscaleProvider {
             .map_err(|_| ProviderError::Rejected("invalid provider API path".into()))?;
         let request = self.client.get(url);
         let request = if authenticated {
-            request.bearer_auth(self.api_key.expose_secret())
+            self.api_key.expose(|api_key| request.bearer_auth(api_key))
         } else {
             request
         };
@@ -313,6 +438,60 @@ impl HeadscaleProvider {
             .ok_or(ProviderError::MalformedResponse(
                 "required Headscale endpoint returned not found",
             ))
+    }
+
+    /// Singular node reads used to reconcile mutations intentionally do not
+    /// inherit the broad read-only "any 404 is absent" convenience behavior.
+    /// Only Headscale's authenticated, resource-specific grpc-gateway envelope
+    /// is evidence that a node is absent; a route miss, proxy response, or
+    /// malformed body remains an error and cannot confirm deletion.
+    async fn get_node_bytes_for_mutation(
+        &self,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, ProviderError> {
+        let url = self
+            .endpoint
+            .join(path.trim_start_matches('/'))
+            .map_err(|_| ProviderError::Rejected("invalid provider API path".into()))?;
+        let request = self
+            .api_key
+            .expose(|api_key| self.client.get(url).bearer_auth(api_key));
+        let mut response = request.send().await.map_err(map_transport_error)?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Err(ProviderError::AuthenticationFailed);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > self.max_response_bytes as u64)
+        {
+            return Err(ProviderError::MalformedResponse(
+                "Headscale response exceeds configured bound",
+            ));
+        }
+        let status = response.status();
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
+            if body.len().saturating_add(chunk.len()) > self.max_response_bytes {
+                return Err(ProviderError::MalformedResponse(
+                    "Headscale response exceeds configured bound",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        match status {
+            StatusCode::NOT_FOUND if is_exact_node_absence(&body) => Ok(None),
+            StatusCode::NOT_FOUND => Err(ProviderError::MalformedResponse(
+                "node 404 is not the exact Headscale absence envelope",
+            )),
+            status if status.is_success() => Ok(Some(body)),
+            status => Err(ProviderError::Rejected(format!(
+                "provider returned HTTP {}",
+                status.as_u16()
+            ))),
+        }
     }
 
     async fn inspect_attempt(&self) -> InspectionAttempt {
@@ -432,6 +611,20 @@ struct RawHealth {
     database_connectivity: bool,
 }
 
+#[derive(Deserialize)]
+struct RawGrpcGatewayError {
+    code: i32,
+    message: String,
+    details: Vec<serde_json::Value>,
+}
+
+fn is_exact_node_absence(body: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<RawGrpcGatewayError>(body),
+        Ok(error) if error.code == 5 && error.message == "node not found" && error.details.is_empty()
+    )
+}
+
 #[async_trait::async_trait]
 impl ReadOnlyProvider for HeadscaleProvider {
     fn instance_id(&self) -> ProviderInstanceId {
@@ -526,6 +719,907 @@ impl ReadOnlyProvider for HeadscaleProvider {
             Err(error) => Ok(health_from_error(&error, attempt.authenticated)),
         }
     }
+}
+
+/// Non-authoritative transport facts that bind a state-issued token to this
+/// adapter instance. It carries no enablement or capability grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeadscaleMutationTransport {
+    network_id: NetworkId,
+    authorization_generation: Generation,
+    configuration_generation: Generation,
+    configuration_fingerprint: String,
+    policy_mode: MutationPolicyMode,
+}
+impl HeadscaleMutationTransport {
+    #[must_use]
+    pub fn new(
+        network_id: NetworkId,
+        authorization_generation: Generation,
+        configuration_generation: Generation,
+        configuration_fingerprint: impl Into<String>,
+        policy_mode: MutationPolicyMode,
+    ) -> Self {
+        Self {
+            network_id,
+            authorization_generation,
+            configuration_generation,
+            configuration_fingerprint: configuration_fingerprint.into(),
+            policy_mode,
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct HeadscalePolicySnapshot {
+    pub policy: String,
+    pub revision: String,
+}
+
+impl fmt::Debug for HeadscalePolicySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HeadscalePolicySnapshot")
+            .field("policy", &"[REDACTED]")
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
+/// Explicitly constructed v0.29.3 mutation capability. It is intentionally
+/// not implemented by `HeadscaleProvider`, preserving that type's read-only
+/// contract for existing import/reconciliation callers.
+pub struct HeadscaleMutationProvider {
+    inner: HeadscaleProvider,
+    transport: HeadscaleMutationTransport,
+}
+impl std::fmt::Debug for HeadscaleMutationProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeadscaleMutationProvider")
+            .field("endpoint", &self.inner.sanitized_endpoint())
+            .field("instance_id", &self.inner.instance_id)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+impl HeadscaleMutationProvider {
+    pub fn new(
+        endpoint: &str,
+        instance_id: ProviderInstanceId,
+        api_key: ProviderApiKey,
+        options: HeadscaleClientOptions,
+        transport: HeadscaleMutationTransport,
+    ) -> Result<Self, HeadscaleError> {
+        Ok(Self {
+            inner: HeadscaleProvider::new(endpoint, instance_id, api_key, options)?,
+            transport,
+        })
+    }
+
+    pub fn new_with_custom_root_ca(
+        endpoint: &str,
+        instance_id: ProviderInstanceId,
+        api_key: ProviderApiKey,
+        options: HeadscaleClientOptions,
+        transport: HeadscaleMutationTransport,
+        custom_root_ca: HeadscaleCustomRootCa,
+    ) -> Result<Self, HeadscaleError> {
+        Ok(Self {
+            inner: HeadscaleProvider::new_with_custom_root_ca(
+                endpoint,
+                instance_id,
+                api_key,
+                options,
+                custom_root_ca,
+            )?,
+            transport,
+        })
+    }
+
+    pub async fn inspect_policy(&self) -> Result<HeadscalePolicySnapshot, MutationOutcome> {
+        self.readiness().await?;
+        let policy = self.policy().await?.policy;
+        Ok(HeadscalePolicySnapshot {
+            revision: policy_revision(&policy),
+            policy,
+        })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        endpoint: &str,
+        instance_id: ProviderInstanceId,
+        api_key: ProviderApiKey,
+        options: HeadscaleClientOptions,
+        transport: HeadscaleMutationTransport,
+    ) -> Result<Self, HeadscaleError> {
+        Ok(Self {
+            inner: HeadscaleProvider::new_for_test(endpoint, instance_id, api_key, options)?,
+            transport,
+        })
+    }
+
+    async fn readiness(&self) -> Result<(), MutationOutcome> {
+        let version = self
+            .inner
+            .get_required("version", false)
+            .await
+            .map_err(outcome_from_error)?;
+        let version: RawVersion =
+            serde_json::from_slice(&version).map_err(|_| MutationOutcome::CompatibilityBlocked)?;
+        if version.dirty || version.version != format!("v{PINNED_HEADSCALE_VERSION}") {
+            return Err(MutationOutcome::CompatibilityBlocked);
+        }
+        let health = self
+            .inner
+            .get_required("api/v1/health", true)
+            .await
+            .map_err(outcome_from_error)?;
+        let health: RawHealth =
+            serde_json::from_slice(&health).map_err(|_| MutationOutcome::CompatibilityBlocked)?;
+        if !health.database_connectivity {
+            return Err(MutationOutcome::CompatibilityBlocked);
+        }
+        Ok(())
+    }
+
+    async fn write_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
+        let url = self
+            .inner
+            .endpoint
+            .join(path.trim_start_matches('/'))
+            .map_err(|_| ProviderError::Rejected("invalid provider API path".into()))?;
+        let request = self.inner.client.request(method, url);
+        let mut request = self
+            .inner
+            .api_key
+            .expose(|api_key| request.bearer_auth(api_key));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let mut response = request.send().await.map_err(map_transport_error)?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Err(ProviderError::AuthenticationFailed);
+        }
+        if !response.status().is_success() {
+            return Err(ProviderError::Rejected(format!(
+                "provider returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > self.inner.max_response_bytes as u64)
+        {
+            return Err(ProviderError::MalformedResponse(
+                "Headscale response exceeds configured bound",
+            ));
+        }
+        let mut body = Zeroizing::new(Vec::new());
+        while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
+            if body.len().saturating_add(chunk.len()) > self.inner.max_response_bytes {
+                return Err(ProviderError::MalformedResponse(
+                    "Headscale response exceeds configured bound",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    async fn pre_node(
+        &self,
+        target: &ProviderIdentity,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Option<ProviderNode>, MutationOutcome> {
+        if target.provider_instance_id != self.inner.instance_id {
+            return Err(MutationOutcome::Conflict);
+        }
+        let path = format!("api/v1/node/{}", target.node_id.as_str());
+        let Some(body) = self
+            .inner
+            .get_node_bytes_for_mutation(&path)
+            .await
+            .map_err(outcome_from_error)?
+        else {
+            return Ok(None);
+        };
+        let text = std::str::from_utf8(&body).map_err(|_| MutationOutcome::Rejected)?;
+        let node = parse_node_fixture(text, self.inner.instance_id, observed_at)
+            .map_err(outcome_from_error)?;
+        if node.identity != *target {
+            return Err(MutationOutcome::Conflict);
+        }
+        Ok(Some(node))
+    }
+
+    async fn policy(&self) -> Result<RawPolicy, MutationOutcome> {
+        let body = self
+            .inner
+            .get_required("api/v1/policy", true)
+            .await
+            .map_err(outcome_from_error)?;
+        serde_json::from_slice(&body).map_err(|_| MutationOutcome::Rejected)
+    }
+
+    /// Headscale can expose legacy plaintext keys from this endpoint. Keep the
+    /// complete bounded body in a zeroizing owner even though the list DTO
+    /// deliberately ignores `key`.
+    async fn pre_auth_list(&self) -> Result<Vec<RawPreAuthKeyList>, ProviderError> {
+        let body = self
+            .write_json(reqwest::Method::GET, "api/v1/preauthkey", None)
+            .await?;
+        parse_pre_auth_list(&body)
+            .map_err(|_| ProviderError::MalformedResponse("invalid Headscale pre-auth key list"))
+    }
+}
+
+#[async_trait::async_trait]
+impl MutationProvider for HeadscaleMutationProvider {
+    type Authorization = MutationAuthorization;
+
+    fn instance_id(&self) -> ProviderInstanceId {
+        self.inner.instance_id
+    }
+
+    async fn execute_mutation(
+        &self,
+        authorization: Self::Authorization,
+        mutation: ProviderMutation,
+    ) -> MutationOutcome {
+        let now = Utc::now();
+        let capability = mutation.capability();
+        if matches!(mutation, ProviderMutation::ApplyPolicy { .. })
+            && !matches!(self.transport.policy_mode, MutationPolicyMode::Database)
+        {
+            let _ = POLICY_MUTATION_UNSUPPORTED;
+            return MutationOutcome::Unsupported;
+        }
+        // Consume state-owned authorization before any local transport or
+        // network request. Runtime version/health evidence follows below.
+        if authorization
+            .validate(MutationAuthorizationContext::headscale(
+                self.transport.network_id,
+                self.inner.instance_id,
+                self.transport.authorization_generation,
+                self.transport.configuration_generation,
+                &self.transport.configuration_fingerprint,
+                "v0.29.3",
+                false,
+                capability,
+                self.transport.policy_mode,
+                now,
+            ))
+            .is_err()
+        {
+            return MutationOutcome::Rejected;
+        }
+        if let Err(outcome) = local_intent_outcome(&mutation, now) {
+            return outcome;
+        }
+        if let Err(outcome) = self.readiness().await {
+            return outcome;
+        }
+        match mutation {
+            ProviderMutation::EnsureNetworkPrincipal { principal } => {
+                let name_path = format!("api/v1/user?name={principal}");
+                let before = match self.inner.get_required(&name_path, true).await {
+                    Ok(body) => match parse_users(&body) {
+                        Ok(users) => users,
+                        Err(()) => return MutationOutcome::Rejected,
+                    },
+                    Err(error) => return outcome_from_error(error),
+                };
+                if before.len() == 1 && before[0].name == principal {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::PrincipalPresent {
+                            principal,
+                            provider_user_id: before[0].id.clone(),
+                        },
+                    };
+                }
+                if !before.is_empty() {
+                    return MutationOutcome::Conflict;
+                }
+                let write = self.write_json(
+                    reqwest::Method::POST,
+                    "api/v1/user",
+                    Some(serde_json::json!({"name": principal, "displayName": "", "email": "", "pictureUrl": ""})),
+                ).await;
+                let response_id = match write {
+                    Ok(body) => match serde_json::from_slice::<RawUserEnvelope>(&body) {
+                        Ok(envelope)
+                            if canonical_positive_u64(&envelope.user.id, "invalid user ID")
+                                .is_ok()
+                                && envelope.user.name == principal =>
+                        {
+                            Some(envelope.user.id)
+                        }
+                        _ => None,
+                    },
+                    Err(ProviderError::AuthenticationFailed) => {
+                        return MutationOutcome::AuthenticationFailed;
+                    }
+                    Err(_) => None,
+                };
+                if let Some(stable_id) = response_id {
+                    let path = format!("api/v1/user?id={stable_id}");
+                    match self.inner.get_required(&path, true).await {
+                        Ok(body) => match parse_users(&body) {
+                            Ok(users) => principal_readback(users, &principal, Some(&stable_id)),
+                            Err(()) => MutationOutcome::Ambiguous {
+                                reason: MutationAmbiguity::ReadBackUnavailable,
+                            },
+                        },
+                        Err(_) => MutationOutcome::Ambiguous {
+                            reason: MutationAmbiguity::ReadBackUnavailable,
+                        },
+                    }
+                } else {
+                    match self.inner.get_required(&name_path, true).await {
+                        Ok(body) => match parse_users(&body) {
+                            Ok(users) => principal_readback(users, &principal, None),
+                            Err(()) => MutationOutcome::Ambiguous {
+                                reason: MutationAmbiguity::ReadBackUnavailable,
+                            },
+                        },
+                        Err(_) => MutationOutcome::Ambiguous {
+                            reason: MutationAmbiguity::ReadBackUnavailable,
+                        },
+                    }
+                }
+            }
+            ProviderMutation::CreateJoinCredential { request } => {
+                if request.reusable
+                    || request.max_uses != 1
+                    || request
+                        .principal
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|id| *id > 0)
+                        .is_none()
+                {
+                    return MutationOutcome::Rejected;
+                }
+                let user_path = format!("api/v1/user?id={}", request.principal);
+                match self.inner.get_required(&user_path, true).await {
+                    Ok(body) if matches!(parse_users(&body), Ok(users) if users.len() == 1 && users[0].id == request.principal) =>
+                        {}
+                    Ok(_) => return MutationOutcome::Rejected,
+                    Err(error) => return outcome_from_error(error),
+                };
+                let expires_at = request
+                    .expires_at
+                    .unwrap_or_else(|| now + chrono::Duration::minutes(15));
+                let acl_tags = request.tags.iter().cloned().collect::<Vec<_>>();
+                let result = self.write_json(reqwest::Method::POST, "api/v1/preauthkey", Some(serde_json::json!({"user": request.principal, "reusable": false, "ephemeral": false, "expiration": expires_at.to_rfc3339(), "aclTags": acl_tags}))).await;
+                let body = match result {
+                    Ok(body) => body,
+                    Err(ProviderError::AuthenticationFailed) => {
+                        return MutationOutcome::AuthenticationFailed;
+                    }
+                    Err(_) => {
+                        return MutationOutcome::Ambiguous {
+                            reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                        };
+                    }
+                };
+                let response: RawPreAuthEnvelope = match serde_json::from_slice(&body) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return MutationOutcome::Ambiguous {
+                            reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                        };
+                    }
+                };
+                if canonical_positive_u64(&response.pre_auth_key.id, "invalid pre-auth key ID")
+                    .is_err()
+                    || response
+                        .pre_auth_key
+                        .user
+                        .as_ref()
+                        .is_none_or(|user| user.id != request.principal)
+                    || response.pre_auth_key.reusable
+                    || response.pre_auth_key.ephemeral
+                    || response.pre_auth_key.used
+                    || response.pre_auth_key.expiration != Some(expires_at)
+                    || response.pre_auth_key.acl_tags != request.tags
+                {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                    };
+                }
+                let reference =
+                    match ProviderCredentialReference::new(response.pre_auth_key.id.clone()) {
+                        Ok(reference) => reference,
+                        Err(_) => return MutationOutcome::Rejected,
+                    };
+                let secret =
+                    match ProviderJoinCredential::new(response.pre_auth_key.key.to_string()) {
+                        Ok(secret) => secret,
+                        Err(_) => {
+                            return MutationOutcome::Ambiguous {
+                                reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                            };
+                        }
+                    };
+                let list = match self.pre_auth_list().await {
+                    Ok(list) => list,
+                    Err(_) => {
+                        return MutationOutcome::Ambiguous {
+                            reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                        };
+                    }
+                };
+                if !list.iter().any(|key| {
+                    key.id == reference.as_str()
+                        && key
+                            .user
+                            .as_ref()
+                            .is_some_and(|user| user.id == request.principal)
+                        && !key.reusable
+                        && !key.ephemeral
+                        && !key.used
+                        && key.expiration == Some(expires_at)
+                        && key.acl_tags == request.tags
+                }) {
+                    return MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable,
+                    };
+                }
+                MutationOutcome::Confirmed {
+                    evidence: MutationEvidence::JoinCredentialIssued(IssuedJoinCredential {
+                        provider_reference: reference,
+                        secret,
+                        expires_at,
+                        max_uses: 1,
+                    }),
+                }
+            }
+            ProviderMutation::RevokeJoinCredential { credential } => {
+                let verification_now = now;
+                let before = match self.pre_auth_list().await {
+                    Ok(keys) => keys,
+                    Err(error) => return outcome_from_error(error),
+                };
+                let matching = before
+                    .iter()
+                    .filter(|key| key.id == credential.as_str())
+                    .collect::<Vec<_>>();
+                match matching.as_slice() {
+                    [] => {
+                        return MutationOutcome::AlreadySatisfied {
+                            evidence: MutationEvidence::CredentialRevoked { credential },
+                        };
+                    }
+                    [key]
+                        if key
+                            .expiration
+                            .as_ref()
+                            .is_some_and(|expiry| *expiry <= verification_now) =>
+                    {
+                        return MutationOutcome::AlreadySatisfied {
+                            evidence: MutationEvidence::CredentialRevoked { credential },
+                        };
+                    }
+                    [_] => {}
+                    _ => return MutationOutcome::Conflict,
+                }
+                let result = self
+                    .write_json(
+                        reqwest::Method::POST,
+                        "api/v1/preauthkey/expire",
+                        Some(serde_json::json!({"id": credential.as_str()})),
+                    )
+                    .await;
+                if matches!(result, Err(ProviderError::AuthenticationFailed)) {
+                    return MutationOutcome::AuthenticationFailed;
+                }
+                let reconciliation_now = Utc::now();
+                match self.pre_auth_list().await {
+                    Ok(keys) => {
+                        credential_revocation_readback(keys, credential, reconciliation_now)
+                    }
+                    Err(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                }
+            }
+            ProviderMutation::ReplaceNodeTags { target, tags } => {
+                let tags = match MutationTags::new(tags) {
+                    Ok(tags) => tags,
+                    Err(_) => return MutationOutcome::Rejected,
+                };
+                let before = match self.pre_node(&target, now).await {
+                    Ok(Some(node)) => node,
+                    Ok(None) => return MutationOutcome::Rejected,
+                    Err(outcome) => return outcome,
+                };
+                if before.tags == *tags.as_set() {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::NodeMatches(before),
+                    };
+                }
+                let values = tags.as_set().iter().cloned().collect::<Vec<_>>();
+                let result = self
+                    .write_json(
+                        reqwest::Method::POST,
+                        &format!("api/v1/node/{}/tags", target.node_id.as_str()),
+                        Some(serde_json::json!({"tags": values})),
+                    )
+                    .await;
+                if matches!(result, Err(ProviderError::AuthenticationFailed)) {
+                    return MutationOutcome::AuthenticationFailed;
+                }
+                match self.pre_node(&target, now).await {
+                    Ok(Some(node)) if node.tags == *tags.as_set() => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::NodeMatches(node),
+                    },
+                    Ok(Some(_)) => MutationOutcome::Failed { retryable: true },
+                    Ok(None) => MutationOutcome::Conflict,
+                    Err(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                }
+            }
+            ProviderMutation::ExpireNode { target } => {
+                let before = match self.pre_node(&target, now).await {
+                    Ok(Some(node)) => node,
+                    Ok(None) => return MutationOutcome::Rejected,
+                    Err(outcome) => return outcome,
+                };
+                if before.expired {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::NodeMatches(before),
+                    };
+                }
+                let result = self
+                    .write_json(
+                        reqwest::Method::POST,
+                        &format!("api/v1/node/{}/expire", target.node_id.as_str()),
+                        None,
+                    )
+                    .await;
+                if matches!(result, Err(ProviderError::AuthenticationFailed)) {
+                    return MutationOutcome::AuthenticationFailed;
+                }
+                match self.pre_node(&target, now).await {
+                    Ok(Some(node)) if node.expired => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::NodeMatches(node),
+                    },
+                    Ok(Some(_)) => MutationOutcome::Failed { retryable: true },
+                    Ok(None) => MutationOutcome::Conflict,
+                    Err(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                }
+            }
+            ProviderMutation::DeleteNode { target } => {
+                match self.pre_node(&target, now).await {
+                    Ok(None) => {
+                        return MutationOutcome::AlreadySatisfied {
+                            evidence: MutationEvidence::NodeAbsent { target },
+                        };
+                    }
+                    Ok(Some(_)) => {}
+                    Err(outcome) => return outcome,
+                }
+                let result = self
+                    .write_json(
+                        reqwest::Method::DELETE,
+                        &format!("api/v1/node/{}", target.node_id.as_str()),
+                        None,
+                    )
+                    .await;
+                if matches!(result, Err(ProviderError::AuthenticationFailed)) {
+                    return MutationOutcome::AuthenticationFailed;
+                }
+                match self.pre_node(&target, now).await {
+                    Ok(None) => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::NodeAbsent { target },
+                    },
+                    Ok(Some(_)) => MutationOutcome::Failed { retryable: true },
+                    Err(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                }
+            }
+            ProviderMutation::ApplyPolicy {
+                expected_revision,
+                policy,
+            } => {
+                let before = match self.policy().await {
+                    Ok(policy) => policy,
+                    Err(outcome) => return outcome,
+                };
+                if policy_revision(&before.policy) != expected_revision {
+                    return MutationOutcome::Conflict;
+                }
+                if before.policy == policy {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::PolicyMatches {
+                            revision: expected_revision,
+                        },
+                    };
+                }
+                if let Err(error) = self
+                    .write_json(
+                        reqwest::Method::POST,
+                        "api/v1/policy/check",
+                        Some(serde_json::json!({"policy": policy})),
+                    )
+                    .await
+                {
+                    return outcome_from_error(error);
+                }
+                let _put_result = self
+                    .write_json(
+                        reqwest::Method::PUT,
+                        "api/v1/policy",
+                        Some(serde_json::json!({"policy": policy})),
+                    )
+                    .await;
+                // A PUT has reached the HTTP transport before any response,
+                // non-auth response/parse/transport result. Reconcile exactly
+                // once; v0.29.3 has no CAS or operation identity.
+                match self.policy().await {
+                    Ok(after) if after.policy == policy => MutationOutcome::Confirmed {
+                        evidence: MutationEvidence::PolicyMatches {
+                            revision: policy_revision(&after.policy),
+                        },
+                    },
+                    Ok(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::PotentiallyApplied,
+                    },
+                    Err(_) => MutationOutcome::Ambiguous {
+                        reason: MutationAmbiguity::ReadBackUnavailable,
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn local_intent_outcome(
+    mutation: &ProviderMutation,
+    now: DateTime<Utc>,
+) -> Result<(), MutationOutcome> {
+    match mutation {
+        ProviderMutation::EnsureNetworkPrincipal { principal } => {
+            if principal.is_empty()
+                || principal.len() > 128
+                || !principal
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(MutationOutcome::Rejected);
+            }
+        }
+        ProviderMutation::CreateJoinCredential { request } => {
+            if request.reusable
+                || request.max_uses != 1
+                || canonical_positive_u64(&request.principal, "invalid principal ID").is_err()
+                || request.tags.len() > 4
+                || request
+                    .tags
+                    .iter()
+                    .any(|tag| MutationTags::new([tag.clone()]).is_err())
+            {
+                return Err(MutationOutcome::Rejected);
+            }
+            if let Some(expires_at) = request.expires_at {
+                let remaining = expires_at - now;
+                if remaining < chrono::Duration::minutes(5)
+                    || remaining > chrono::Duration::hours(1)
+                {
+                    return Err(MutationOutcome::Rejected);
+                }
+            }
+        }
+        ProviderMutation::RevokeJoinCredential { credential } => {
+            if canonical_positive_u64(credential.as_str(), "invalid credential ID").is_err() {
+                return Err(MutationOutcome::Rejected);
+            }
+        }
+        ProviderMutation::ReplaceNodeTags { target, tags } => {
+            if canonical_positive_u64(target.node_id.as_str(), "invalid node ID").is_err()
+                || MutationTags::new(tags.clone()).is_err()
+            {
+                return Err(MutationOutcome::Rejected);
+            }
+        }
+        ProviderMutation::ExpireNode { target } | ProviderMutation::DeleteNode { target } => {
+            if canonical_positive_u64(target.node_id.as_str(), "invalid node ID").is_err() {
+                return Err(MutationOutcome::Rejected);
+            }
+        }
+        ProviderMutation::ApplyPolicy {
+            expected_revision,
+            policy,
+        } => {
+            if expected_revision.is_empty() || policy.len() > 1024 * 1024 {
+                return Err(MutationOutcome::Rejected);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn outcome_from_error(error: ProviderError) -> MutationOutcome {
+    match error {
+        ProviderError::AuthenticationFailed => MutationOutcome::AuthenticationFailed,
+        ProviderError::Timeout | ProviderError::TlsFailure | ProviderError::Unreachable(_) => {
+            MutationOutcome::Unavailable
+        }
+        ProviderError::Conflict(_) => MutationOutcome::Conflict,
+        ProviderError::Unsupported(_) => MutationOutcome::Unsupported,
+        ProviderError::Rejected(_) | ProviderError::MalformedResponse(_) => {
+            MutationOutcome::Rejected
+        }
+        ProviderError::AmbiguousMutation(_) => MutationOutcome::Ambiguous {
+            reason: MutationAmbiguity::PotentiallyApplied,
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct RawUsers {
+    users: Vec<RawUserName>,
+}
+#[derive(Deserialize)]
+struct RawUserName {
+    id: String,
+    name: String,
+}
+#[derive(Deserialize)]
+struct RawUserEnvelope {
+    user: RawUserName,
+}
+fn parse_users(body: &[u8]) -> Result<Vec<RawUserName>, ()> {
+    let users: RawUsers = serde_json::from_slice(body).map_err(|_| ())?;
+    if users.users.len() > 1_000
+        || users.users.iter().any(|user| {
+            canonical_positive_u64(&user.id, "invalid user ID").is_err()
+                || user.name.is_empty()
+                || user.name.len() > 128
+        })
+    {
+        return Err(());
+    }
+    Ok(users.users)
+}
+
+fn principal_readback(
+    users: Vec<RawUserName>,
+    principal: &str,
+    expected_id: Option<&str>,
+) -> MutationOutcome {
+    match users.as_slice() {
+        [] => MutationOutcome::Failed { retryable: true },
+        [user]
+            if user.name == principal && expected_id.is_none_or(|expected| expected == user.id) =>
+        {
+            MutationOutcome::Confirmed {
+                evidence: MutationEvidence::PrincipalPresent {
+                    principal: principal.to_owned(),
+                    provider_user_id: user.id.clone(),
+                },
+            }
+        }
+        _ => MutationOutcome::Conflict,
+    }
+}
+fn credential_revocation_readback(
+    keys: Vec<RawPreAuthKeyList>,
+    credential: ProviderCredentialReference,
+    verification_now: DateTime<Utc>,
+) -> MutationOutcome {
+    let matching = keys
+        .iter()
+        .filter(|key| key.id == credential.as_str())
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] => MutationOutcome::Confirmed {
+            evidence: MutationEvidence::CredentialRevoked { credential },
+        },
+        [key]
+            if key
+                .expiration
+                .as_ref()
+                .is_some_and(|expiry| *expiry <= verification_now) =>
+        {
+            MutationOutcome::Confirmed {
+                evidence: MutationEvidence::CredentialRevoked { credential },
+            }
+        }
+        [_] => MutationOutcome::Failed { retryable: true },
+        _ => MutationOutcome::Conflict,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPreAuthEnvelope {
+    pre_auth_key: RawPreAuthKeyMutation,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPreAuthList {
+    pre_auth_keys: Vec<RawPreAuthKeyList>,
+}
+fn parse_pre_auth_list(body: &[u8]) -> Result<Vec<RawPreAuthKeyList>, ()> {
+    let list: RawPreAuthList = serde_json::from_slice(body).map_err(|_| ())?;
+    if list.pre_auth_keys.len() > 10_000
+        || list.pre_auth_keys.iter().any(|key| {
+            canonical_positive_u64(&key.id, "invalid pre-auth key ID").is_err()
+                || key.user.as_ref().is_none_or(|user| {
+                    canonical_positive_u64(&user.id, "invalid pre-auth user ID").is_err()
+                })
+                || key.acl_tags.len() > 4
+                || key
+                    .acl_tags
+                    .iter()
+                    .any(|tag| MutationTags::new([tag.clone()]).is_err())
+        })
+    {
+        return Err(());
+    }
+    Ok(list.pre_auth_keys)
+}
+fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Zeroizing::new)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPreAuthKeyMutation {
+    id: String,
+    #[serde(default, deserialize_with = "deserialize_zeroizing_string")]
+    key: Zeroizing<String>,
+    user: Option<RawUserName>,
+    #[serde(default)]
+    reusable: bool,
+    #[serde(default)]
+    ephemeral: bool,
+    #[serde(default)]
+    used: bool,
+    expiration: Option<DateTime<Utc>>,
+    #[serde(default)]
+    acl_tags: BTreeSet<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPreAuthKeyList {
+    id: String,
+    user: Option<RawUserName>,
+    #[serde(default)]
+    reusable: bool,
+    #[serde(default)]
+    ephemeral: bool,
+    #[serde(default)]
+    used: bool,
+    expiration: Option<DateTime<Utc>>,
+    #[serde(default)]
+    acl_tags: BTreeSet<String>,
+}
+#[derive(Deserialize)]
+struct RawPolicy {
+    policy: String,
+}
+fn policy_revision(policy: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(policy.as_bytes()))
 }
 
 fn health_from_error(error: &ProviderError, authenticated_response: bool) -> ProviderHealth {

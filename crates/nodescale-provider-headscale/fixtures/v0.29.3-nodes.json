@@ -13,7 +13,7 @@
       "expiry": "2026-08-29T12:00:00Z",
       "preAuthKey": {
         "id": "9",
-        "key": "<synthetic-preauth-credential>",
+
         "user": {"id": "7", "name": "user-1", "displayName": "User One"},
         "reusable": false,
         "ephemeral": false,

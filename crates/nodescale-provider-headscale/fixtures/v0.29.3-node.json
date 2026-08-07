@@ -8,7 +8,7 @@
     "name": "worker-1",
     "givenName": "worker-1",
     "user": {"id": "7", "name": "user-1", "displayName": "User One"},
-    "preAuthKey": {"id": "9", "key": "<synthetic-preauth-credential>", "used": true},
+    "preAuthKey": {"id": "9", "used": true},
     "createdAt": "2026-07-29T12:00:00Z",
     "online": true,
     "tags": ["tag:worker"]

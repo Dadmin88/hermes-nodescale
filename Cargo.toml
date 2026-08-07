@@ -18,7 +18,8 @@ repository = "https://github.com/DeployFaith/nodescale"
 [workspace.dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rcgen = "0.13"
 rusqlite = { version = "0.37", features = ["bundled"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +28,8 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1.9"
+x509-parser = "0.17"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -149,6 +149,18 @@ fn secret_values_are_redacted() {
 }
 
 #[test]
+fn provider_native_credential_reference_is_validated_and_redacted() {
+    let reference = ProviderCredentialReference::new("42").unwrap();
+    assert_eq!(reference.as_str(), "42");
+    assert_eq!(
+        format!("{reference:?}"),
+        "ProviderCredentialReference([REDACTED])"
+    );
+    assert_eq!(format!("{reference}"), "[REDACTED]");
+    assert!(ProviderCredentialReference::new("not safe / reference").is_err());
+}
+
+#[test]
 fn identity_evidence_is_not_collapsed() {
     let device = Device::new(id(), id(), "controller-1", Utc::now()).unwrap();
     assert!(device.provider_identity.is_none());

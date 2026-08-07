@@ -21,7 +21,6 @@ uuid.workspace = true
 async-trait.workspace = true
 tempfile = "3"
 nodescale-provider-fake = { path = "../nodescale-provider-fake" }
-nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }
 tokio.workspace = true
 
 [lints]
