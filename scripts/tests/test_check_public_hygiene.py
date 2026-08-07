@@ -85,6 +85,15 @@ class ExactTreeHygieneTests(unittest.TestCase):
         self.assertNotIn(secret, result.stdout)
         self.assertNotIn(secret, result.stderr)
 
+    def test_reports_complete_invitation_token_without_echoing_it(self) -> None:
+        token = "ns" + "join_" + ("A" * 64)
+        tree = self.write_tree("fixtures/invitation.txt", token + "\n")
+        result = self.scan(tree)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("nodescale-invitation-token", result.stdout)
+        self.assertNotIn(token, result.stdout)
+        self.assertNotIn(token, result.stderr)
+
     def test_rejects_commit_object_and_short_object_name(self) -> None:
         tree = self.write_tree("README.md", "public fixture\n")
         commit = run("git", "commit-tree", tree, cwd=self.repo,).stdout.strip()

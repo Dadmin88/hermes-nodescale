@@ -33,6 +33,9 @@ RULES = {
         r"\b" + "100" + r"\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b"
     ),
     "private-hostname-suffix": re.compile(r"\b[A-Za-z0-9-]+\." + "mesh" + r"\b"),
+    "nodescale-invitation-token": re.compile(
+        "ns" + "join_" + r"[A-Za-z0-9_-]{64}(?![A-Za-z0-9_-])"
+    ),
     "invitation-value": re.compile(
         r"(?i)(?:invitation|pre.?auth).{0,20}(?:secret|key)\s*[:=]\s*['\"][^<][^'\"]{7,}"
     ),

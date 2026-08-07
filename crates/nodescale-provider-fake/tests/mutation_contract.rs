@@ -1,8 +1,8 @@
 use chrono::{Duration, Utc};
 use nodescale_domain::{Generation, NetworkId, ProviderCredentialReference, ProviderIdentity};
 use nodescale_provider::{
-    JoinCredentialRequest, MutationAmbiguity, MutationOutcome, MutationProvider, Provider,
-    ProviderMutation, ProviderMutationCapability,
+    JoinCredentialRequest, MutationAmbiguity, MutationEvidence, MutationOutcome, MutationProvider,
+    Provider, ProviderMutation, ProviderMutationCapability,
 };
 use nodescale_provider_fake::{
     AsyncFakeMutationProvider, FakeMutationAuthorization, FakeMutationScript, FakeProvider,
@@ -345,4 +345,236 @@ async fn fake_fifo_old_and_conflict_scripts_cover_every_mutation_family() {
 
     assert_eq!(principal_provider.mutation_dispatch_count(), 2);
     assert_eq!(principal_provider.mutation_trace().len(), 2);
+}
+
+#[tokio::test]
+async fn n4a_credential_certainty_matrix_counts_only_provider_applies_and_redacts_observations() {
+    let create_provider =
+        AsyncFakeMutationProvider::new(FakeProvider::compatible("n4a-create-success"));
+    let create_authorization = authorization_for(
+        &create_provider,
+        ProviderMutationCapability::CreateJoinCredential,
+    );
+    assert!(format!("{create_authorization:?}") == "FakeMutationAuthorization([REDACTED])");
+    let create_outcome = create_provider
+        .execute_mutation(
+            create_authorization,
+            ProviderMutation::CreateJoinCredential {
+                request: JoinCredentialRequest::single_use("n4a-create-principal"),
+            },
+        )
+        .await;
+    assert!(matches!(
+        &create_outcome,
+        MutationOutcome::Confirmed {
+            evidence: MutationEvidence::JoinCredentialIssued(_)
+        }
+    ));
+    assert!(!format!("{create_outcome:?}").contains("fake-secret-"));
+    let create_trace = create_provider.mutation_trace();
+    assert_eq!(create_provider.mutation_dispatch_count(), 1);
+    assert_eq!(create_trace.len(), 1);
+    assert!(create_trace[0].dispatched && create_trace[0].read_back);
+    assert!(!format!("{create_trace:?}").contains("n4a-create-principal"));
+    assert!(!format!("{create_trace:?}").contains("fake-secret-"));
+
+    let unavailable_provider =
+        AsyncFakeMutationProvider::new(FakeProvider::compatible("n4a-before-send-unavailable"));
+    let unavailable_capability = ProviderMutationCapability::CreateJoinCredential;
+    unavailable_provider.script(
+        unavailable_capability,
+        FakeMutationScript::BeforeSendUnavailable,
+    );
+    let unavailable_outcome = unavailable_provider
+        .execute_mutation(
+            authorization_for(&unavailable_provider, unavailable_capability),
+            ProviderMutation::CreateJoinCredential {
+                request: JoinCredentialRequest::single_use("n4a-unavailable-principal"),
+            },
+        )
+        .await;
+    assert!(matches!(unavailable_outcome, MutationOutcome::Unavailable));
+    assert_eq!(unavailable_provider.mutation_dispatch_count(), 0);
+    assert!(unavailable_provider.mutation_trace().is_empty());
+
+    let conflict_provider =
+        AsyncFakeMutationProvider::new(FakeProvider::compatible("n4a-before-send-conflict"));
+    conflict_provider.script(
+        unavailable_capability,
+        FakeMutationScript::BeforeSendConflict,
+    );
+    let conflict_outcome = conflict_provider
+        .execute_mutation(
+            authorization_for(&conflict_provider, unavailable_capability),
+            ProviderMutation::CreateJoinCredential {
+                request: JoinCredentialRequest::single_use("n4a-conflict-principal"),
+            },
+        )
+        .await;
+    assert!(matches!(conflict_outcome, MutationOutcome::Conflict));
+    assert_eq!(conflict_provider.mutation_dispatch_count(), 0);
+    assert!(conflict_provider.mutation_trace().is_empty());
+
+    let lost_create_provider =
+        AsyncFakeMutationProvider::new(FakeProvider::compatible("n4a-create-response-loss"));
+    let lost_create_capability = ProviderMutationCapability::CreateJoinCredential;
+    lost_create_provider.script(
+        lost_create_capability,
+        FakeMutationScript::AfterApplyResponseLoss,
+    );
+    let lost_create_outcome = lost_create_provider
+        .execute_mutation(
+            authorization_for(&lost_create_provider, lost_create_capability),
+            ProviderMutation::CreateJoinCredential {
+                request: JoinCredentialRequest::single_use("n4a-loss-principal"),
+            },
+        )
+        .await;
+    assert!(matches!(
+        lost_create_outcome,
+        MutationOutcome::Ambiguous {
+            reason: MutationAmbiguity::PotentiallyAppliedSecretUnavailable
+        }
+    ));
+    let lost_create_trace = lost_create_provider.mutation_trace();
+    assert_eq!(lost_create_provider.mutation_dispatch_count(), 1);
+    assert_eq!(lost_create_trace.len(), 1);
+    assert!(lost_create_trace[0].dispatched);
+    assert!(!format!("{lost_create_trace:?}").contains("n4a-loss-principal"));
+    assert!(!format!("{lost_create_trace:?}").contains("fake-secret-"));
+
+    let mut revocation_inner = FakeProvider::compatible("n4a-revoke");
+    let issued = revocation_inner
+        .create_join_credential(&JoinCredentialRequest::single_use("n4a-revoke-principal"))
+        .expect("deterministic fake fixture issues a credential");
+    let credential = ProviderCredentialReference::new(issued.credential_id.to_string())
+        .expect("deterministic fake credential has a safe reference");
+    let revocation_provider = AsyncFakeMutationProvider::new(revocation_inner);
+    let revoke_capability = ProviderMutationCapability::InvalidateJoinCredential;
+    let revoke_authorization = authorization_for(&revocation_provider, revoke_capability);
+    let revoke_outcome = revocation_provider
+        .execute_mutation(
+            revoke_authorization.clone(),
+            ProviderMutation::RevokeJoinCredential {
+                credential: credential.clone(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        revoke_outcome,
+        MutationOutcome::Confirmed {
+            evidence: MutationEvidence::CredentialRevoked { .. }
+        }
+    ));
+    assert_eq!(revocation_provider.mutation_dispatch_count(), 1);
+    assert_eq!(revocation_provider.mutation_trace().len(), 1);
+    let already_invalid_outcome = revocation_provider
+        .execute_mutation(
+            revoke_authorization,
+            ProviderMutation::RevokeJoinCredential {
+                credential: credential.clone(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        already_invalid_outcome,
+        MutationOutcome::AlreadySatisfied {
+            evidence: MutationEvidence::CredentialRevoked { .. }
+        }
+    ));
+    assert_eq!(revocation_provider.mutation_dispatch_count(), 1);
+    assert_eq!(revocation_provider.mutation_trace().len(), 1);
+
+    for (fixture, script, expected_unavailable) in [
+        (
+            "n4a-revoke-response-loss",
+            FakeMutationScript::AfterApplyResponseLoss,
+            false,
+        ),
+        (
+            "n4a-revoke-readback-unavailable",
+            FakeMutationScript::AfterApplyReadBackUnavailable,
+            true,
+        ),
+        (
+            "n4a-revoke-readback-conflict",
+            FakeMutationScript::AfterApplyReadBackConflict,
+            false,
+        ),
+    ] {
+        let mut inner = FakeProvider::compatible(fixture);
+        let issued = inner
+            .create_join_credential(&JoinCredentialRequest::single_use("n4a-revoke-principal"))
+            .expect("deterministic fake fixture issues a credential");
+        let credential = ProviderCredentialReference::new(issued.credential_id.to_string())
+            .expect("deterministic fake credential has a safe reference");
+        let provider = AsyncFakeMutationProvider::new(inner);
+        provider.script(revoke_capability, script);
+        let outcome = provider
+            .execute_mutation(
+                authorization_for(&provider, revoke_capability),
+                ProviderMutation::RevokeJoinCredential { credential },
+            )
+            .await;
+        if expected_unavailable {
+            assert!(matches!(
+                outcome,
+                MutationOutcome::Ambiguous {
+                    reason: MutationAmbiguity::ReadBackUnavailable
+                }
+            ));
+            assert!(!provider.mutation_trace()[0].read_back);
+        } else if matches!(script, FakeMutationScript::AfterApplyReadBackConflict) {
+            assert!(matches!(outcome, MutationOutcome::Conflict));
+        } else {
+            assert!(matches!(
+                outcome,
+                MutationOutcome::Confirmed {
+                    evidence: MutationEvidence::CredentialRevoked { .. }
+                }
+            ));
+        }
+        assert_eq!(provider.mutation_dispatch_count(), 1);
+        assert_eq!(provider.mutation_trace().len(), 1);
+    }
+
+    let authentication_provider =
+        AsyncFakeMutationProvider::new(FakeProvider::authentication_failed("n4a-authentication"));
+    let authentication_outcome = authentication_provider
+        .execute_mutation(
+            authorization_for(
+                &authentication_provider,
+                ProviderMutationCapability::CreateJoinCredential,
+            ),
+            ProviderMutation::CreateJoinCredential {
+                request: JoinCredentialRequest::single_use("n4a-auth-principal"),
+            },
+        )
+        .await;
+    assert!(matches!(
+        authentication_outcome,
+        MutationOutcome::AuthenticationFailed
+    ));
+    assert_eq!(authentication_provider.mutation_dispatch_count(), 0);
+    assert!(authentication_provider.mutation_trace().is_empty());
+
+    let compatibility_provider =
+        AsyncFakeMutationProvider::new(FakeProvider::degraded("n4a-compatibility"));
+    let compatibility_outcome = compatibility_provider
+        .execute_mutation(
+            authorization_for(
+                &compatibility_provider,
+                ProviderMutationCapability::CreateJoinCredential,
+            ),
+            ProviderMutation::CreateJoinCredential {
+                request: JoinCredentialRequest::single_use("n4a-compatibility-principal"),
+            },
+        )
+        .await;
+    assert!(matches!(
+        compatibility_outcome,
+        MutationOutcome::CompatibilityBlocked
+    ));
+    assert_eq!(compatibility_provider.mutation_dispatch_count(), 0);
+    assert!(compatibility_provider.mutation_trace().is_empty());
 }

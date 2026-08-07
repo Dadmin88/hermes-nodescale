@@ -521,6 +521,7 @@ pub enum FakeMutationScript {
     BeforeSendUnavailable,
     BeforeSendAuthenticationFailed,
     BeforeSendRejected,
+    BeforeSendConflict,
     AfterApplyResponseLoss,
     AfterApplyReadBackUnavailable,
     /// The write was accepted but authoritative readback is still old.
@@ -540,13 +541,18 @@ pub struct FakeMutationTrace {
 
 /// Test-only mutation token for the deterministic fake. It is intentionally a
 /// different public type from state-owned real authorization.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FakeMutationAuthorization {
     network_id: NetworkId,
     instance_id: ProviderInstanceId,
     generation: Generation,
     capabilities: BTreeSet<ProviderMutationCapability>,
     expires_at: chrono::DateTime<chrono::Utc>,
+}
+impl std::fmt::Debug for FakeMutationAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FakeMutationAuthorization([REDACTED])")
+    }
 }
 impl FakeMutationAuthorization {
     #[must_use]
@@ -719,6 +725,13 @@ impl MutationProvider for AsyncFakeMutationProvider {
             Ok(inspection) => inspection,
             Err(error) => return mutation_error_outcome(error),
         };
+        match inspection.compatibility {
+            CompatibilityStatus::AuthenticationFailed => {
+                return MutationOutcome::AuthenticationFailed;
+            }
+            CompatibilityStatus::Unreachable => return MutationOutcome::Unavailable,
+            _ => {}
+        }
         if !inspection.compatibility.allows_mutation() || !inspection.mutation_allowed {
             return MutationOutcome::CompatibilityBlocked;
         }
@@ -730,6 +743,7 @@ impl MutationProvider for AsyncFakeMutationProvider {
                 return MutationOutcome::AuthenticationFailed;
             }
             Some(FakeMutationScript::BeforeSendRejected) => return MutationOutcome::Rejected,
+            Some(FakeMutationScript::BeforeSendConflict) => return MutationOutcome::Conflict,
             script @ Some(
                 FakeMutationScript::AfterApplyResponseLoss
                 | FakeMutationScript::AfterApplyReadBackUnavailable
@@ -754,7 +768,13 @@ impl MutationProvider for AsyncFakeMutationProvider {
             after_apply_script,
             Some(FakeMutationScript::AfterApplyReadBackConflict)
         );
-        self.trace(capability, true, !readback_unavailable);
+        if !matches!(
+            &mutation,
+            ProviderMutation::CreateJoinCredential { .. }
+                | ProviderMutation::RevokeJoinCredential { .. }
+        ) {
+            self.trace(capability, true, !readback_unavailable);
+        }
         match mutation {
             ProviderMutation::EnsureNetworkPrincipal { principal } => {
                 let already = provider.principals.contains(&principal);
@@ -794,6 +814,10 @@ impl MutationProvider for AsyncFakeMutationProvider {
                 }
             }
             ProviderMutation::CreateJoinCredential { request } => {
+                if request.max_uses != 1 || request.reusable {
+                    return MutationOutcome::Rejected;
+                }
+                self.trace(capability, true, !readback_unavailable);
                 let credential = match Provider::create_join_credential(&mut *provider, &request) {
                     Ok(credential) => credential,
                     Err(error) => return mutation_error_outcome(error),
@@ -829,6 +853,17 @@ impl MutationProvider for AsyncFakeMutationProvider {
                     Ok(credential_id) => credential_id,
                     Err(_) => return MutationOutcome::Rejected,
                 };
+                let credential_key = credential_id.to_string();
+                let active = match provider.credentials.get(&credential_key).copied() {
+                    Some(active) => active,
+                    None => return MutationOutcome::Rejected,
+                };
+                if !active {
+                    return MutationOutcome::AlreadySatisfied {
+                        evidence: MutationEvidence::CredentialRevoked { credential },
+                    };
+                }
+                self.trace(capability, true, !readback_unavailable);
                 let result = Provider::revoke_join_credential(&mut *provider, credential_id);
                 match result {
                     Ok(()) if readback_unavailable => MutationOutcome::Ambiguous {

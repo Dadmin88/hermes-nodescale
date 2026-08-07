@@ -22,15 +22,18 @@ use std::{
 };
 use thiserror::Error;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 4;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 const MUTATION_AUTHORIZATION_MIGRATION: &str =
     include_str!("../migrations/0003_mutation_authorization.sql");
+const INVITATION_LIFECYCLE_MIGRATION: &str =
+    include_str!("../migrations/0004_invitation_lifecycle.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
     BeforeAuditInsert,
+    BeforeN4ConfirmationAudit,
 }
 
 #[derive(Debug, Error)]
@@ -225,9 +228,206 @@ impl SanitizedMetadata {
     fn json(&self) -> Result<String, StateError> {
         Ok(serde_json::to_string(&self.0)?)
     }
+
+    fn n4_digest_json(&self) -> Result<String, StateError> {
+        if self.0.as_object().is_some_and(Map::is_empty) {
+            return Ok("{}".into());
+        }
+        let canonical = serde_json::to_vec(&self.0)?;
+        Ok(format!(
+            "{{\"sha256\":\"{:x}\"}}",
+            Sha256::digest(canonical)
+        ))
+    }
+}
+impl Default for SanitizedMetadata {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
-/// Owner-supplied replacement for the separately persisted mutation plane.
+/// Exact N4 provider routing context, deliberately free of plaintext secrets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct N4InvitationContext {
+    pub provider_instance_id: ProviderInstanceId,
+    pub provider_principal_id: String,
+}
+impl N4InvitationContext {
+    pub fn new(
+        provider_instance_id: ProviderInstanceId,
+        provider_principal_id: impl Into<String>,
+    ) -> Result<Self, StateError> {
+        let provider_principal_id = provider_principal_id.into();
+        if !safe_identifier(&provider_principal_id) {
+            return Err(StateError::Conflict("invalid N4 provider principal".into()));
+        }
+        Ok(Self {
+            provider_instance_id,
+            provider_principal_id,
+        })
+    }
+}
+
+/// Redacted candidate used solely by the service's private Argon2 verification boundary.
+#[derive(Eq, PartialEq)]
+pub struct N4InvitationCandidate {
+    pub invitation_id: nodescale_domain::InvitationId,
+    pub network_id: NetworkId,
+    pub revision: u64,
+    pub state: nodescale_domain::InvitationState,
+    pub expires_at: DateTime<Utc>,
+    pub context: N4InvitationContext,
+    verifier: nodescale_domain::SecretVerifier,
+}
+impl N4InvitationCandidate {
+    pub fn verify(&self, token: &nodescale_domain::InvitationToken) -> Result<bool, StateError> {
+        if token.invitation_id() != self.invitation_id {
+            return Ok(false);
+        }
+        self.verifier.verify(token).map_err(|_| {
+            StateError::Conflict("N4 invitation verifier could not be evaluated".into())
+        })
+    }
+}
+impl std::fmt::Debug for N4InvitationCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("N4InvitationCandidate")
+            .field("invitation_id", &self.invitation_id)
+            .field("network_id", &self.network_id)
+            .field("revision", &self.revision)
+            .field("state", &self.state)
+            .field("expires_at", &self.expires_at)
+            .field("context", &self.context)
+            .field("verifier", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Sanitized lifecycle/reconciliation state suitable for public status views.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum N4CleanupState {
+    Active,
+    Pending,
+    Confirmed,
+    Retryable,
+    Ambiguous,
+    Blocked,
+    None,
+}
+
+/// Public/list-safe N4 view: neither verifier nor provider-native credential reference is present.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct N4InvitationView {
+    pub invitation_id: nodescale_domain::InvitationId,
+    pub network_id: NetworkId,
+    pub state: nodescale_domain::InvitationState,
+    pub revision: u64,
+    pub roles: nodescale_domain::Roles,
+    pub join_constraints: nodescale_domain::JoinConstraints,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub max_uses: u32,
+    pub used_count: u32,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub cleanup_state: N4CleanupState,
+    pub context: N4InvitationContext,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct N4PresentedMetadata {
+    pub platform: Option<String>,
+    pub hostname_hint: Option<String>,
+    pub correlation: SanitizedMetadata,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct N4RedemptionReservation {
+    pub join_session_id: JoinSessionId,
+    pub invitation_id: nodescale_domain::InvitationId,
+    pub network_id: NetworkId,
+    pub expires_at: DateTime<Utc>,
+    pub context: N4InvitationContext,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct N4CredentialDispatch {
+    pub join_session_id: JoinSessionId,
+    pub invitation_id: nodescale_domain::InvitationId,
+    pub network_id: NetworkId,
+    pub context: N4InvitationContext,
+    pub authorization_generation: Generation,
+    pub configuration_generation: Generation,
+    pub configuration_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct N4CredentialConfirmation {
+    pub credential_id: ProviderCredentialId,
+    pub provider_reference: ProviderCredentialReference,
+    pub provider_principal_id: String,
+    pub ephemeral: bool,
+    pub approved_tags: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+    pub confirmed_at: DateTime<Utc>,
+    pub safe_correlation: SanitizedMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum N4DispatchFailure {
+    PreDispatch,
+    DefiniteNoApply,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum N4InvalidationOutcome {
+    Confirmed,
+    AlreadySatisfied,
+    Retryable,
+    Ambiguous,
+    AuthenticationFailed,
+    CompatibilityBlocked,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum N4CleanupIntent {
+    Revoked,
+    Expired,
+}
+
+/// Exact durable provider cleanup routing. Its `Debug` redacts the native reference.
+#[derive(Clone, Eq, PartialEq)]
+pub struct N4CleanupTarget {
+    pub invitation_id: nodescale_domain::InvitationId,
+    pub join_session_id: Option<JoinSessionId>,
+    pub credential_id: Option<ProviderCredentialId>,
+    pub provider_reference: Option<ProviderCredentialReference>,
+    pub network_id: NetworkId,
+    pub provider_instance_id: ProviderInstanceId,
+    pub intent: N4CleanupIntent,
+    pub cleanup_uncertain: bool,
+}
+impl std::fmt::Debug for N4CleanupTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("N4CleanupTarget")
+            .field("invitation_id", &self.invitation_id)
+            .field("join_session_id", &self.join_session_id)
+            .field("credential_id", &self.credential_id)
+            .field(
+                "provider_reference",
+                &self.provider_reference.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("network_id", &self.network_id)
+            .field("provider_instance_id", &self.provider_instance_id)
+            .field("intent", &self.intent)
+            .field("cleanup_uncertain", &self.cleanup_uncertain)
+            .finish()
+    }
+}
+
 /// Imports remain permanently read-only and never imply authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderMutationConfiguration {
@@ -439,6 +639,7 @@ impl MutationAuthorization {
 pub struct StateStore {
     connection: RefCell<Connection>,
     fail_before_audit: Cell<bool>,
+    fail_before_n4_confirmation_audit: Cell<bool>,
 }
 
 impl StateStore {
@@ -469,6 +670,7 @@ impl StateStore {
                 .and_then(|()| connection.pragma_update(None, "user_version", 1_u32))
                 .and_then(|()| connection.execute_batch(DISCOVERY_MIGRATION))
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
+                .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -484,6 +686,7 @@ impl StateStore {
             let migration_result = connection
                 .execute_batch(DISCOVERY_MIGRATION)
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
+                .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -498,6 +701,21 @@ impl StateStore {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
             let migration_result = connection
                 .execute_batch(MUTATION_AUTHORIZATION_MIGRATION)
+                .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 3 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result = connection
+                .execute_batch(INVITATION_LIFECYCLE_MIGRATION)
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -512,6 +730,7 @@ impl StateStore {
         Ok(Self {
             connection: RefCell::new(connection),
             fail_before_audit: Cell::new(false),
+            fail_before_n4_confirmation_audit: Cell::new(false),
         })
     }
 
@@ -532,6 +751,9 @@ impl StateStore {
     pub fn set_failpoint(&self, failpoint: Failpoint, enabled: bool) {
         match failpoint {
             Failpoint::BeforeAuditInsert => self.fail_before_audit.set(enabled),
+            Failpoint::BeforeN4ConfirmationAudit => {
+                self.fail_before_n4_confirmation_audit.set(enabled);
+            }
         }
     }
 
@@ -556,6 +778,469 @@ impl StateStore {
             tx.execute("INSERT INTO devices (device_id,network_id,display_name,membership_state,provider_instance_id,provider_node_id,provider_key_fingerprint,credential_generation,keryx_binding_generation,fleet_projection_generation,fleet_projection_status,record_json,created_at,updated_at,revoked_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)", params![device.device_id.to_string(), device.network_id.to_string(), device.display_name, lower(device.membership_state.as_str()), provider_instance, provider_node, provider_key, to_i64(device.generations.credential)?, to_i64(device.generations.keryx_binding)?, to_i64(device.generations.fleet_projection)?, lower(device.fleet_projection_status.as_str()), serde_json::to_string(device)?, device.created_at.to_rfc3339(), device.updated_at.to_rfc3339(), device.revoked_at.map(|value| value.to_rfc3339())]).map_err(map_constraint)?;
             tx.execute("INSERT INTO device_generations (device_id,credential_generation,keryx_binding_generation,fleet_projection_generation,updated_at) VALUES (?1,?2,?3,?4,?5)", params![device.device_id.to_string(), to_i64(device.generations.credential)?, to_i64(device.generations.keryx_binding)?, to_i64(device.generations.fleet_projection)?, device.updated_at.to_rfc3339()]).map_err(map_constraint)?;
             store.append_audit(tx, Some(device.network_id), Some(device.device_id), actor, "device.created", "success", Some(device.generations.credential), &SanitizedMetadata::empty())
+        })
+    }
+
+    /// Issue a single-use N4 invitation only against an exact currently enabled
+    /// mutation configuration with both create and invalidation capability.
+    pub fn issue_n4_invitation(
+        &self,
+        invitation: &Invitation,
+        context: N4InvitationContext,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        if invitation.validate_n4_issuance().is_err()
+            || invitation.network_id != self.network(invitation.network_id)?.network_id
+            || now < invitation.created_at
+            || now >= invitation.expires_at
+        {
+            return Err(StateError::Conflict("invalid N4 invitation input".into()));
+        }
+        self.transactional(|tx, store| {
+            let authorized: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_mutation_configurations c JOIN provider_imports i ON i.network_id=c.network_id AND i.provider_instance_id=c.provider_instance_id WHERE c.network_id=?1 AND c.provider_instance_id=?2 AND c.enabled=1 AND c.revoked=0 AND ?3>=c.not_before_ms AND ?3<c.expires_at_ms AND EXISTS (SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability='CreateJoinCredential') AND EXISTS (SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability='InvalidateJoinCredential'))",
+                params![invitation.network_id.to_string(), context.provider_instance_id.to_string(), now.timestamp_millis()],
+                |row| row.get(0),
+            )?;
+            if !authorized { return Err(StateError::MutationAuthorizationDenied("N4 requires exact enabled create/invalidate configuration")); }
+            tx.execute("INSERT INTO invitations (invitation_id,network_id,state,secret_verifier,provider_credential_reference,max_uses,used_count,record_json,created_at,expires_at) VALUES (?1,?2,?3,?4,NULL,1,0,?5,?6,?7)", params![invitation.invitation_id.to_string(), invitation.network_id.to_string(), lower(invitation.state.as_str()), invitation.secret_verifier.as_str(), serde_json::to_string(invitation)?, invitation.created_at.to_rfc3339(), invitation.expires_at.to_rfc3339()]).map_err(map_constraint)?;
+            tx.execute("INSERT INTO n4_invitation_details (invitation_id,network_id,provider_instance_id,provider_principal_id,roles_json,constraints_json,created_by_source,created_by_id,revision,last_redemption_metadata_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,'{}')", params![invitation.invitation_id.to_string(), invitation.network_id.to_string(), context.provider_instance_id.to_string(), context.provider_principal_id, serde_json::to_string(&invitation.roles)?, serde_json::to_string(&invitation.join_constraints)?, actor.source, actor.actor_id])?;
+            store.append_n4_audit(tx, invitation.invitation_id, None, &format!("invitation:{}:created", invitation.invitation_id), actor, "invitation_created", "success", &SanitizedMetadata::empty())?;
+            Ok(())
+        })
+    }
+
+    /// Return a N4-only candidate. Legacy invitations intentionally have no
+    /// extension row and fail closed instead of becoming redeemable by upgrade.
+    pub fn n4_invitation_candidate(
+        &self,
+        invitation_id: nodescale_domain::InvitationId,
+    ) -> Result<N4InvitationCandidate, StateError> {
+        let row = self.connection.borrow().query_row(
+            "SELECT i.record_json,d.revision,d.provider_instance_id,d.provider_principal_id FROM invitations i JOIN n4_invitation_details d ON d.invitation_id=i.invitation_id WHERE i.invitation_id=?1",
+            [invitation_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+        ).optional()?.ok_or_else(|| StateError::NotFound(invitation_id.to_string()))?;
+        let invitation: Invitation = serde_json::from_str(&row.0)?;
+        Ok(N4InvitationCandidate {
+            invitation_id,
+            network_id: invitation.network_id,
+            revision: row.1,
+            state: invitation.state,
+            expires_at: invitation.expires_at,
+            context: N4InvitationContext::new(
+                ProviderInstanceId::parse(&row.2)
+                    .map_err(|error| StateError::Conflict(error.to_string()))?,
+                row.3,
+            )?,
+            verifier: invitation.secret_verifier,
+        })
+    }
+
+    pub fn n4_invitation_view(
+        &self,
+        invitation_id: nodescale_domain::InvitationId,
+    ) -> Result<N4InvitationView, StateError> {
+        self.n4_view_row(&self.connection.borrow(), invitation_id)
+    }
+
+    /// Deterministic N4-only listing; legacy invitation rows have no extension and are excluded.
+    pub fn list_n4_invitations(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<Vec<N4InvitationView>, StateError> {
+        let connection = self.connection.borrow();
+        let mut statement = connection.prepare(
+            "SELECT d.invitation_id FROM n4_invitation_details d JOIN invitations i ON i.invitation_id=d.invitation_id WHERE d.network_id=?1 ORDER BY i.created_at, d.invitation_id",
+        )?;
+        let ids = statement
+            .query_map([network_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                self.n4_view_row(
+                    &connection,
+                    nodescale_domain::InvitationId::parse(&id)
+                        .map_err(|error| StateError::Conflict(error.to_string()))?,
+                )
+            })
+            .collect()
+    }
+
+    fn n4_view_row(
+        &self,
+        connection: &Connection,
+        invitation_id: nodescale_domain::InvitationId,
+    ) -> Result<N4InvitationView, StateError> {
+        let row = connection.query_row(
+            "SELECT i.record_json,i.used_count,d.revision,d.provider_instance_id,d.provider_principal_id,d.consumed_at_ms,d.revoked_at_ms,d.expired_at_ms,COALESCE(m.invalidation_state,'none') FROM invitations i JOIN n4_invitation_details d ON d.invitation_id=i.invitation_id LEFT JOIN n4_join_session_dispatches x ON x.invitation_id=i.invitation_id LEFT JOIN n4_provider_credential_metadata m ON m.join_session_id=x.join_session_id WHERE i.invitation_id=?1",
+            [invitation_id.to_string()],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?, r.get::<_, u64>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?, r.get::<_, Option<i64>>(7)?, r.get::<_, String>(8)?)),
+        ).optional()?.ok_or_else(|| StateError::NotFound(invitation_id.to_string()))?;
+        let invitation: Invitation = serde_json::from_str(&row.0)?;
+        let parse_time = |value: Option<i64>| {
+            value
+                .and_then(DateTime::from_timestamp_millis)
+                .ok_or_else(|| StateError::Conflict("invalid persisted N4 timestamp".into()))
+        };
+        let cleanup_state = match row.8.as_str() {
+            "active" => N4CleanupState::Active,
+            "pending" => N4CleanupState::Pending,
+            "confirmed" => N4CleanupState::Confirmed,
+            "retryable" => N4CleanupState::Retryable,
+            "ambiguous" => N4CleanupState::Ambiguous,
+            "blocked" => N4CleanupState::Blocked,
+            "none" => N4CleanupState::None,
+            _ => return Err(StateError::Conflict("invalid N4 cleanup state".into())),
+        };
+        Ok(N4InvitationView {
+            invitation_id,
+            network_id: invitation.network_id,
+            state: invitation.state,
+            revision: row.2,
+            roles: invitation.roles,
+            join_constraints: invitation.join_constraints,
+            created_at: invitation.created_at,
+            expires_at: invitation.expires_at,
+            max_uses: invitation.max_uses,
+            used_count: row.1,
+            consumed_at: match row.5 {
+                Some(value) => Some(parse_time(Some(value))?),
+                None => None,
+            },
+            revoked_at: match row.6 {
+                Some(value) => Some(parse_time(Some(value))?),
+                None => None,
+            },
+            expired_at: match row.7 {
+                Some(value) => Some(parse_time(Some(value))?),
+                None => None,
+            },
+            cleanup_state,
+            context: N4InvitationContext::new(
+                ProviderInstanceId::parse(&row.3)
+                    .map_err(|error| StateError::Conflict(error.to_string()))?,
+                row.4,
+            )?,
+        })
+    }
+
+    pub fn prepare_n4_revocation(
+        &self,
+        invitation_id: nodescale_domain::InvitationId,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<N4CleanupTarget, StateError> {
+        self.prepare_n4_cleanup(invitation_id, now, actor, N4CleanupIntent::Revoked)
+    }
+
+    pub fn prepare_n4_expiry(
+        &self,
+        invitation_id: nodescale_domain::InvitationId,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<N4CleanupTarget, StateError> {
+        self.prepare_n4_cleanup(invitation_id, now, actor, N4CleanupIntent::Expired)
+    }
+
+    pub fn expired_n4_invitation_ids(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<nodescale_domain::InvitationId>, StateError> {
+        let connection = self.connection.borrow();
+        let mut statement = connection.prepare("SELECT i.invitation_id FROM invitations i JOIN n4_invitation_details d ON d.invitation_id=i.invitation_id WHERE i.expires_at<=?1 AND i.state NOT IN ('expired','revoked') ORDER BY i.invitation_id")?;
+        statement
+            .query_map([now.to_rfc3339()], |row| row.get::<_, String>(0))?
+            .map(|id| {
+                nodescale_domain::InvitationId::parse(&id?)
+                    .map_err(|error| StateError::Conflict(error.to_string()))
+            })
+            .collect()
+    }
+
+    fn prepare_n4_cleanup(
+        &self,
+        invitation_id: nodescale_domain::InvitationId,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+        intent: N4CleanupIntent,
+    ) -> Result<N4CleanupTarget, StateError> {
+        self.transactional(|tx, store| {
+            let row = tx.query_row("SELECT i.record_json,d.provider_instance_id,x.join_session_id,x.credential_id,x.dispatch_state,r.provider_reference FROM invitations i JOIN n4_invitation_details d ON d.invitation_id=i.invitation_id LEFT JOIN n4_join_session_dispatches x ON x.invitation_id=i.invitation_id LEFT JOIN confirmed_provider_credential_references r ON r.credential_id=x.credential_id WHERE i.invitation_id=?1", [invitation_id.to_string()], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, Option<String>>(2)?,r.get::<_, Option<String>>(3)?,r.get::<_, Option<String>>(4)?,r.get::<_, Option<String>>(5)?))).optional()?.ok_or_else(|| StateError::NotFound(invitation_id.to_string()))?;
+            let (record, instance, session_id, credential_id, dispatch_state, provider_reference) = row;
+            let mut invitation: Invitation = serde_json::from_str(&record)?;
+            if intent == N4CleanupIntent::Expired && now < invitation.expires_at {
+                return Err(StateError::Conflict(
+                    "N4 invitation has not reached its expiry deadline".into(),
+                ));
+            }
+            let instance = ProviderInstanceId::parse(&instance).map_err(|e| StateError::Conflict(e.to_string()))?;
+            let session_id = session_id.map(|value| JoinSessionId::parse(&value).map_err(|e| StateError::Conflict(e.to_string()))).transpose()?;
+            let credential_id = credential_id.map(|value| ProviderCredentialId::parse(&value).map_err(|e| StateError::Conflict(e.to_string()))).transpose()?;
+            let reference = provider_reference.map(ProviderCredentialReference::new).transpose().map_err(|e| StateError::Conflict(e.to_string()))?;
+            let cleanup_uncertain = reference.is_none() && session_id.is_some();
+            let target = N4CleanupTarget { invitation_id, join_session_id: session_id, credential_id, provider_reference: reference, network_id: invitation.network_id, provider_instance_id: instance, intent, cleanup_uncertain };
+            let terminal = matches!(invitation.state, nodescale_domain::InvitationState::Revoked | nodescale_domain::InvitationState::Expired);
+            if terminal || (matches!(dispatch_state.as_deref(), Some("revocation_pending"))
+                && !(intent == N4CleanupIntent::Expired
+                    && target.provider_reference.is_none()
+                    && now >= invitation.expires_at)) {
+                return Ok(target);
+            }
+            if target.provider_reference.is_none() && session_id.is_some() && matches!(dispatch_state.as_deref(), Some("dispatch_started") | Some("ambiguous")) && !(intent == N4CleanupIntent::Expired && now >= invitation.expires_at) {
+                let pending_state = match intent { N4CleanupIntent::Revoked => nodescale_domain::InvitationState::Revoking, N4CleanupIntent::Expired => nodescale_domain::InvitationState::Expiring };
+                invitation.state = invitation.state.transition(pending_state).map_err(|e| StateError::Conflict(e.to_string()))?;
+                tx.execute("UPDATE invitations SET state=?2,record_json=?3 WHERE invitation_id=?1", params![invitation_id.to_string(), lower(invitation.state.as_str()), serde_json::to_string(&invitation)?])?;
+                tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state='revocation_pending' WHERE invitation_id=?1 AND dispatch_state IN ('dispatch_started','ambiguous')", [invitation_id.to_string()])?;
+                let Some(pending_session_id) = session_id else { return Err(StateError::Conflict("N4 cleanup session is absent".into())); };
+                let session_record: String = tx.query_row("SELECT record_json FROM join_sessions WHERE join_session_id=?1", [pending_session_id.to_string()], |r| r.get(0))?;
+                let mut session: JoinSession = serde_json::from_str(&session_record)?;
+                session.advance_n4(JoinSessionState::ProviderCredentialRevocationPending, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+                tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![session.join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+                return Ok(target);
+            }
+            if target.provider_reference.is_some() && matches!(dispatch_state.as_deref(), Some("confirmed")) {
+                let pending_state = match intent { N4CleanupIntent::Revoked => nodescale_domain::InvitationState::Revoking, N4CleanupIntent::Expired => nodescale_domain::InvitationState::Expiring };
+                invitation.state = invitation.state.transition(pending_state).map_err(|e| StateError::Conflict(e.to_string()))?;
+                tx.execute("UPDATE invitations SET state=?2,record_json=?3 WHERE invitation_id=?1", params![invitation_id.to_string(), lower(invitation.state.as_str()), serde_json::to_string(&invitation)?])?;
+                let next = match intent { N4CleanupIntent::Revoked => "revocation_pending", N4CleanupIntent::Expired => "revocation_pending" };
+                tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state=?2 WHERE invitation_id=?1 AND dispatch_state='confirmed'", params![invitation_id.to_string(), next])?;
+                tx.execute("UPDATE n4_provider_credential_metadata SET invalidation_state='pending' WHERE credential_id=?1", [credential_id.expect("confirmed has credential").to_string()])?;
+                let session_record: String = tx.query_row("SELECT record_json FROM join_sessions WHERE join_session_id=?1", [session_id.expect("confirmed has session").to_string()], |r| r.get(0))?;
+                let mut session: JoinSession = serde_json::from_str(&session_record)?;
+                session.advance_n4(JoinSessionState::ProviderCredentialRevocationPending, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+                tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![session.join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+                return Ok(target);
+            }
+            let intermediate = match intent { N4CleanupIntent::Revoked => nodescale_domain::InvitationState::Revoking, N4CleanupIntent::Expired => nodescale_domain::InvitationState::Expiring };
+            let next = match intent { N4CleanupIntent::Revoked => nodescale_domain::InvitationState::Revoked, N4CleanupIntent::Expired => nodescale_domain::InvitationState::Expired };
+            if intent == N4CleanupIntent::Expired
+                && invitation.state == nodescale_domain::InvitationState::Revoking
+            {
+                // Expiry is the authoritative terminal reason once its deadline
+                // is reached, even when an earlier no-reference revoke left a
+                // local-only cleanup pending. The generic domain graph cannot
+                // express the cross-intent pending-to-expired recovery edge.
+                invitation.state = nodescale_domain::InvitationState::Expired;
+            } else {
+                if invitation.state != intermediate {
+                    invitation.state = invitation
+                        .state
+                        .transition(intermediate)
+                        .map_err(|e| StateError::Conflict(e.to_string()))?;
+                }
+                invitation.state = invitation
+                    .state
+                    .transition(next)
+                    .map_err(|e| StateError::Conflict(e.to_string()))?;
+            }
+            tx.execute("UPDATE invitations SET state=?2,record_json=?3 WHERE invitation_id=?1", params![invitation_id.to_string(), lower(invitation.state.as_str()), serde_json::to_string(&invitation)?])?;
+            if let Some(session_id) = session_id {
+                let session_record: String = tx.query_row("SELECT record_json FROM join_sessions WHERE join_session_id=?1", [session_id.to_string()], |r| r.get(0))?;
+                let mut session: JoinSession = serde_json::from_str(&session_record)?;
+                let terminal_session = match intent { N4CleanupIntent::Revoked => JoinSessionState::Revoked, N4CleanupIntent::Expired => JoinSessionState::Expired };
+                if session.state != terminal_session && session.state != JoinSessionState::Failed {
+                    session.advance_n4(terminal_session, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+                    tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![session.join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+                }
+            }
+            if dispatch_state.is_some() {
+                let terminal_dispatch = match intent { N4CleanupIntent::Revoked => "revoked", N4CleanupIntent::Expired => "expired" };
+                tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state=?2,resolved_at_ms=COALESCE(resolved_at_ms,?3) WHERE invitation_id=?1 AND dispatch_state IN ('reserved','failed_pre_dispatch','failed_no_apply','revocation_pending')", params![invitation_id.to_string(), terminal_dispatch, now.timestamp_millis()])?;
+            }
+            tx.execute(match intent { N4CleanupIntent::Revoked => "UPDATE n4_invitation_details SET revoked_at_ms=?2,revision=revision+1 WHERE invitation_id=?1", N4CleanupIntent::Expired => "UPDATE n4_invitation_details SET expired_at_ms=?2,revision=revision+1 WHERE invitation_id=?1" }, params![invitation_id.to_string(), now.timestamp_millis()])?;
+            store.append_n4_audit(tx, invitation_id, None, &format!("invitation:{}:{:?}", invitation_id, intent), actor, match intent { N4CleanupIntent::Revoked => "invitation_revoked", N4CleanupIntent::Expired => "invitation_expired" }, "success", &SanitizedMetadata::empty())?;
+            Ok(target)
+        })
+    }
+
+    pub fn settle_n4_credential_invalidation(
+        &self,
+        target: N4CleanupTarget,
+        outcome: N4InvalidationOutcome,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        self.transactional(|tx, store| {
+            let (session_id, credential_id, network, instance, reference, dispatch_state, invitation_record): (String, String, String, String, String, String, String) = tx.query_row(
+                "SELECT d.join_session_id,d.credential_id,d.network_id,d.provider_instance_id,r.provider_reference,d.dispatch_state,i.record_json FROM n4_join_session_dispatches d JOIN confirmed_provider_credential_references r ON r.credential_id=d.credential_id JOIN invitations i ON i.invitation_id=d.invitation_id WHERE d.invitation_id=?1",
+                [target.invitation_id.to_string()],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+            ).optional()?.ok_or_else(|| StateError::Conflict("N4 invalidation target has no exact durable credential".into()))?;
+            if target.join_session_id.map(|id| id.to_string()).as_deref() != Some(&session_id)
+                || target.credential_id.map(|id| id.to_string()).as_deref() != Some(&credential_id)
+                || target.provider_reference.as_ref().map(ProviderCredentialReference::as_str) != Some(reference.as_str())
+                || target.network_id.to_string() != network || target.provider_instance_id.to_string() != instance {
+                return Err(StateError::Conflict("N4 invalidation target does not exactly match durable provenance".into()));
+            }
+            match outcome {
+                N4InvalidationOutcome::Confirmed | N4InvalidationOutcome::AlreadySatisfied => {
+                    let terminal_dispatch = match target.intent { N4CleanupIntent::Revoked => "revoked", N4CleanupIntent::Expired => "expired" };
+                    if matches!(dispatch_state.as_str(), "revoked" | "expired") {
+                        if dispatch_state == terminal_dispatch {
+                            return Ok(());
+                        }
+                        return Err(StateError::Conflict("N4 terminal invalidation intent conflicts with durable dispatch".into()));
+                    }
+                    if dispatch_state != "revocation_pending" { return Err(StateError::Conflict("N4 invalidation is not pending".into())); }
+                    let metadata_changed = tx.execute("UPDATE n4_provider_credential_metadata SET invalidation_state='confirmed',invalidated_at_ms=?2 WHERE credential_id=?1 AND invalidation_state IN ('pending','retryable','ambiguous','blocked')", params![credential_id, now.timestamp_millis()])?;
+                    if metadata_changed != 1 { return Err(StateError::Conflict("N4 invalidation metadata did not settle exactly once".into())); }
+                    tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state=?2,resolved_at_ms=COALESCE(resolved_at_ms,?3) WHERE invitation_id=?1 AND dispatch_state='revocation_pending'", params![target.invitation_id.to_string(), terminal_dispatch, now.timestamp_millis()])?;
+                    let mut invitation: Invitation = serde_json::from_str(&invitation_record)?;
+                    let invitation_terminal = match target.intent { N4CleanupIntent::Revoked => nodescale_domain::InvitationState::Revoked, N4CleanupIntent::Expired => nodescale_domain::InvitationState::Expired };
+                    invitation.state = invitation.state.transition(invitation_terminal).map_err(|e| StateError::Conflict(e.to_string()))?;
+                    tx.execute("UPDATE invitations SET state=?2,record_json=?3 WHERE invitation_id=?1", params![target.invitation_id.to_string(), lower(invitation.state.as_str()), serde_json::to_string(&invitation)?])?;
+                    tx.execute(match target.intent { N4CleanupIntent::Revoked => "UPDATE n4_invitation_details SET revoked_at_ms=?2,revision=revision+1 WHERE invitation_id=?1", N4CleanupIntent::Expired => "UPDATE n4_invitation_details SET expired_at_ms=?2,revision=revision+1 WHERE invitation_id=?1" }, params![target.invitation_id.to_string(), now.timestamp_millis()])?;
+                    let session_record: String = tx.query_row("SELECT record_json FROM join_sessions WHERE join_session_id=?1", [session_id], |r| r.get(0))?;
+                    let mut session: JoinSession = serde_json::from_str(&session_record)?;
+                    session.advance_n4(match target.intent { N4CleanupIntent::Revoked => JoinSessionState::Revoked, N4CleanupIntent::Expired => JoinSessionState::Expired }, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+                    tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![session.join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+                    let action = format!("credential-invalidation:{}:{:?}", credential_id, target.intent);
+                    store.append_n4_audit(tx, target.invitation_id, target.join_session_id, &action, actor.clone(), "provider_join_credential_invalidated", "success", &SanitizedMetadata::empty())?;
+                    store.append_n4_audit(tx, target.invitation_id, target.join_session_id, &action, actor, match target.intent { N4CleanupIntent::Revoked => "invitation_revoked", N4CleanupIntent::Expired => "invitation_expired" }, "success", &SanitizedMetadata::empty())?;
+                }
+                N4InvalidationOutcome::Retryable | N4InvalidationOutcome::Ambiguous | N4InvalidationOutcome::AuthenticationFailed | N4InvalidationOutcome::CompatibilityBlocked | N4InvalidationOutcome::Blocked => {
+                    let state = match outcome { N4InvalidationOutcome::Retryable => "retryable", N4InvalidationOutcome::Ambiguous => "ambiguous", N4InvalidationOutcome::AuthenticationFailed | N4InvalidationOutcome::CompatibilityBlocked | N4InvalidationOutcome::Blocked => "blocked", _ => unreachable!() };
+                    tx.execute("UPDATE n4_provider_credential_metadata SET invalidation_state=?2 WHERE credential_id=?1 AND invalidation_state IN ('pending','retryable','ambiguous','blocked')", params![credential_id, state])?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn reserve_n4_redemption(
+        &self,
+        invitation_id: nodescale_domain::InvitationId,
+        expected_revision: u64,
+        join_session_id: JoinSessionId,
+        now: DateTime<Utc>,
+        presented: N4PresentedMetadata,
+        actor: AuditActor,
+    ) -> Result<N4RedemptionReservation, StateError> {
+        self.transactional(|tx, store| {
+            let (record, revision, instance, principal): (String, u64, String, String) = tx.query_row("SELECT i.record_json,d.revision,d.provider_instance_id,d.provider_principal_id FROM invitations i JOIN n4_invitation_details d ON d.invitation_id=i.invitation_id WHERE i.invitation_id=?1", [invitation_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?.ok_or_else(|| StateError::NotFound(invitation_id.to_string()))?;
+            let mut invitation: Invitation = serde_json::from_str(&record)?;
+            let context = N4InvitationContext::new(ProviderInstanceId::parse(&instance).map_err(|e| StateError::Conflict(e.to_string()))?, principal)?;
+            if revision != expected_revision || invitation.state != nodescale_domain::InvitationState::Issued || invitation.used_count != 0 || invitation.max_uses != 1 || now >= invitation.expires_at || invitation.join_constraints.expected_platform().is_some_and(|v| presented.platform.as_deref() != Some(v)) || invitation.join_constraints.expected_hostname_hint().is_some_and(|v| presented.hostname_hint.as_deref() != Some(v)) { return Err(StateError::Conflict("N4 invitation is not reservable".into())); }
+            let current: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_mutation_configurations c WHERE c.network_id=?1 AND c.provider_instance_id=?2 AND c.enabled=1 AND c.revoked=0 AND ?3>=c.not_before_ms AND ?3<c.expires_at_ms AND EXISTS(SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability='CreateJoinCredential') AND EXISTS(SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability='InvalidateJoinCredential'))", params![invitation.network_id.to_string(), instance, now.timestamp_millis()], |r| r.get(0))?;
+            if !current { return Err(StateError::MutationAuthorizationDenied("N4 provider configuration unavailable")); }
+            invitation.state = nodescale_domain::InvitationState::Redeeming; invitation.used_count = 1;
+            if tx.execute("UPDATE invitations SET state='redeeming',used_count=1,record_json=?2 WHERE invitation_id=?1 AND state='issued' AND used_count=0", params![invitation_id.to_string(), serde_json::to_string(&invitation)?])? != 1 { return Err(StateError::Conflict("N4 reservation lost".into())); }
+            let mut session = JoinSession::new_n4(join_session_id, invitation_id, invitation.network_id, now, invitation.expires_at).map_err(|e| StateError::Conflict(e.to_string()))?; session.advance_n4(JoinSessionState::InvitationValidated, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+            tx.execute("INSERT INTO join_sessions (join_session_id,invitation_id,network_id,device_id,state,record_json,created_at,expires_at,updated_at) VALUES (?1,?2,?3,NULL,?4,?5,?6,?7,?6)", params![join_session_id.to_string(), invitation_id.to_string(), invitation.network_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339(), invitation.expires_at.to_rfc3339()])?;
+            tx.execute("INSERT INTO n4_join_session_dispatches (join_session_id,invitation_id,network_id,provider_instance_id,provider_principal_id,create_request_id,dispatch_state) VALUES (?1,?2,?3,?4,?5,?6,'reserved')", params![join_session_id.to_string(), invitation_id.to_string(), invitation.network_id.to_string(), context.provider_instance_id.to_string(), context.provider_principal_id, uuid::Uuid::new_v4().to_string()])?;
+            tx.execute("UPDATE n4_invitation_details SET revision=revision+1,last_redemption_at_ms=?2,last_redemption_metadata_json=?3 WHERE invitation_id=?1 AND revision=?4", params![invitation_id.to_string(), now.timestamp_millis(), presented.correlation.n4_digest_json()?, i64::try_from(expected_revision).map_err(|_| StateError::Conflict("revision overflow".into()))?])?;
+            let action_id = format!("redemption:{join_session_id}");
+            store.append_n4_audit(tx, invitation_id, Some(join_session_id), &action_id, actor.clone(), "invitation_redemption_started", "success", &SanitizedMetadata::empty())?;
+            store.append_n4_audit(tx, invitation_id, Some(join_session_id), &action_id, actor, "join_session_created", "success", &SanitizedMetadata::empty())?;
+            Ok(N4RedemptionReservation { join_session_id, invitation_id, network_id: invitation.network_id, expires_at: invitation.expires_at, context })
+        })
+    }
+
+    pub fn begin_n4_credential_dispatch(
+        &self,
+        join_session_id: JoinSessionId,
+        now: DateTime<Utc>,
+        _actor: AuditActor,
+    ) -> Result<N4CredentialDispatch, StateError> {
+        self.transactional(|tx, _| {
+            let (record, invitation_id, network, instance, principal, state): (String,String,String,String,String,String) = tx.query_row("SELECT s.record_json,d.invitation_id,d.network_id,d.provider_instance_id,d.provider_principal_id,d.dispatch_state FROM n4_join_session_dispatches d JOIN join_sessions s ON s.join_session_id=d.join_session_id WHERE d.join_session_id=?1", [join_session_id.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?.ok_or_else(|| StateError::NotFound(join_session_id.to_string()))?;
+            if state != "reserved" { return Err(StateError::Conflict("N4 dispatch already fenced".into())); }
+            let (auth, config, fingerprint): (u64,u64,String) = tx.query_row("SELECT authorization_generation,configuration_generation,configuration_fingerprint FROM provider_mutation_configurations c WHERE c.network_id=?1 AND c.provider_instance_id=?2 AND c.enabled=1 AND c.revoked=0 AND ?3>=c.not_before_ms AND ?3<c.expires_at_ms AND EXISTS(SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability='CreateJoinCredential')", params![network, instance, now.timestamp_millis()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(StateError::MutationAuthorizationDenied("N4 create authority unavailable"))?;
+            let mut session: JoinSession = serde_json::from_str(&record)?; if !session.is_n4() || session.state != JoinSessionState::InvitationValidated || now >= session.expires_at { return Err(StateError::Conflict("N4 session not dispatchable".into())); }; session.advance_n4(JoinSessionState::ProviderCredentialIssuing, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+            tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+            tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state='dispatch_started',authorization_generation=?2,configuration_generation=?3,configuration_fingerprint=?4,dispatched_at_ms=?5 WHERE join_session_id=?1 AND dispatch_state='reserved'", params![join_session_id.to_string(), i64::try_from(auth).map_err(|_| StateError::Conflict("generation overflow".into()))?, i64::try_from(config).map_err(|_| StateError::Conflict("generation overflow".into()))?, fingerprint, now.timestamp_millis()])?;
+            Ok(N4CredentialDispatch { join_session_id, invitation_id: nodescale_domain::InvitationId::parse(&invitation_id).map_err(|e| StateError::Conflict(e.to_string()))?, network_id: NetworkId::parse(&network).map_err(|e| StateError::Conflict(e.to_string()))?, context: N4InvitationContext::new(ProviderInstanceId::parse(&instance).map_err(|e| StateError::Conflict(e.to_string()))?, principal)?, authorization_generation: generation(auth)?, configuration_generation: generation(config)?, configuration_fingerprint: fingerprint })
+        })
+    }
+
+    pub fn begin_n4_credential_dispatch_with_authorization(
+        &self,
+        join_session_id: JoinSessionId,
+        now: DateTime<Utc>,
+        _actor: AuditActor,
+    ) -> Result<(N4CredentialDispatch, MutationAuthorization), StateError> {
+        self.transactional(|tx, _| {
+            let (record, invitation_id, network, instance, principal, state): (String, String, String, String, String, String) = tx.query_row("SELECT s.record_json,d.invitation_id,d.network_id,d.provider_instance_id,d.provider_principal_id,d.dispatch_state FROM n4_join_session_dispatches d JOIN join_sessions s ON s.join_session_id=d.join_session_id WHERE d.join_session_id=?1", [join_session_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or_else(|| StateError::NotFound(join_session_id.to_string()))?;
+            if state != "reserved" { return Err(StateError::Conflict("N4 dispatch already fenced".into())); }
+            let row: (u64, u64, String, String, String, i64, i64, i64, i64, String) = tx.query_row("SELECT c.authorization_generation,c.configuration_generation,c.configuration_fingerprint,c.adapter,c.expected_version,c.enabled,c.revoked,c.not_before_ms,c.expires_at_ms,c.policy_mode FROM provider_mutation_configurations c JOIN provider_imports i ON i.network_id=c.network_id AND i.provider_instance_id=c.provider_instance_id WHERE c.network_id=?1 AND c.provider_instance_id=?2 AND i.read_only=1 AND i.mutation_allowed=0 AND EXISTS(SELECT 1 FROM provider_mutation_capabilities p WHERE p.network_id=c.network_id AND p.provider_instance_id=c.provider_instance_id AND p.capability='CreateJoinCredential')", params![network, instance], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).optional()?.ok_or(StateError::MutationAuthorizationDenied("N4 create authority unavailable"))?;
+            let (auth_generation, config_generation, fingerprint, adapter, expected_version, enabled, revoked, not_before_ms, expires_at_ms, policy_mode) = row;
+            let not_before = DateTime::from_timestamp_millis(not_before_ms).ok_or(StateError::MutationAuthorizationDenied("invalid persisted not-before"))?;
+            let authority_expires_at = DateTime::from_timestamp_millis(expires_at_ms).ok_or(StateError::MutationAuthorizationDenied("invalid persisted expiry"))?;
+            if enabled != 1 || revoked != 0 || now < not_before || now >= authority_expires_at || !valid_sha256_fingerprint(&fingerprint) || adapter != "headscale" || expected_version != "v0.29.3" { return Err(StateError::MutationAuthorizationDenied("N4 create authority unavailable")); }
+            let mut session: JoinSession = serde_json::from_str(&record)?;
+            if !session.is_n4() || session.state != JoinSessionState::InvitationValidated || now >= session.expires_at { return Err(StateError::Conflict("N4 session not dispatchable".into())); }
+            session.advance_n4(JoinSessionState::ProviderCredentialIssuing, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+            tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+            tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state='dispatch_started',authorization_generation=?2,configuration_generation=?3,configuration_fingerprint=?4,dispatched_at_ms=?5 WHERE join_session_id=?1 AND dispatch_state='reserved'", params![join_session_id.to_string(), i64::try_from(auth_generation).map_err(|_| StateError::Conflict("generation overflow".into()))?, i64::try_from(config_generation).map_err(|_| StateError::Conflict("generation overflow".into()))?, fingerprint, now.timestamp_millis()])?;
+            let network_id = NetworkId::parse(&network).map_err(|e| StateError::Conflict(e.to_string()))?;
+            let provider_instance_id = ProviderInstanceId::parse(&instance).map_err(|e| StateError::Conflict(e.to_string()))?;
+            let authorization = MutationAuthorization { network_id, provider_instance_id, authorization_generation: generation(auth_generation)?, configuration_generation: generation(config_generation)?, configuration_fingerprint: fingerprint.clone(), adapter, expected_version, not_before, expires_at: authority_expires_at, capability: ProviderMutationCapability::CreateJoinCredential, policy_mode: parse_policy_mode(&policy_mode)? };
+            let dispatch = N4CredentialDispatch { join_session_id, invitation_id: nodescale_domain::InvitationId::parse(&invitation_id).map_err(|e| StateError::Conflict(e.to_string()))?, network_id, context: N4InvitationContext::new(provider_instance_id, principal)?, authorization_generation: generation(auth_generation)?, configuration_generation: generation(config_generation)?, configuration_fingerprint: fingerprint };
+            Ok((dispatch, authorization))
+        })
+    }
+
+    pub fn confirm_n4_credential(
+        &self,
+        join_session_id: JoinSessionId,
+        confirmation: N4CredentialConfirmation,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        if !safe_identifier(&confirmation.provider_principal_id)
+            || confirmation.ephemeral
+            || confirmation.approved_tags.is_empty()
+            || confirmation.approved_tags.len() > 4
+            || confirmation
+                .approved_tags
+                .iter()
+                .any(|value| !n4_approved_tag(value))
+        {
+            return Err(StateError::Conflict(
+                "invalid N4 credential metadata".into(),
+            ));
+        }
+        self.transactional(|tx, store| {
+            let row: (String,String,String,String,String,String,u64,u64,String,String) = tx.query_row("SELECT s.record_json,i.record_json,d.invitation_id,d.network_id,d.provider_instance_id,d.provider_principal_id,d.authorization_generation,d.configuration_generation,d.configuration_fingerprint,d.dispatch_state FROM n4_join_session_dispatches d JOIN join_sessions s ON s.join_session_id=d.join_session_id JOIN invitations i ON i.invitation_id=d.invitation_id WHERE d.join_session_id=?1", [join_session_id.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).optional()?.ok_or_else(|| StateError::NotFound(join_session_id.to_string()))?;
+            let (session_record, invitation_record, invitation_id, network, instance, principal, auth, config, fingerprint, state) = row;
+            let mut invitation: Invitation = serde_json::from_str(&invitation_record)?;
+            if state != "dispatch_started" || principal != confirmation.provider_principal_id || invitation.state != nodescale_domain::InvitationState::Redeeming || invitation.used_count != 1 || invitation.max_uses != 1 || confirmation.confirmed_at >= invitation.expires_at || confirmation.expires_at > invitation.expires_at || confirmation.expires_at <= confirmation.confirmed_at { return Err(StateError::Conflict("N4 confirmation is not valid for the durable fence".into())); }
+            tx.execute("INSERT INTO confirmed_provider_credential_references (credential_id,network_id,provider_instance_id,provider_reference,authorization_generation,configuration_generation,configuration_fingerprint,confirmed_at_ms,expires_at_ms,max_uses) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,1)", params![confirmation.credential_id.to_string(), network, instance, confirmation.provider_reference.as_str(), i64::try_from(auth).map_err(|_| StateError::Conflict("generation overflow".into()))?, i64::try_from(config).map_err(|_| StateError::Conflict("generation overflow".into()))?, fingerprint, confirmation.confirmed_at.timestamp_millis(), confirmation.expires_at.timestamp_millis()]).map_err(map_constraint)?;
+            let changed = tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state='confirmed',credential_id=?2,resolved_at_ms=?3 WHERE join_session_id=?1 AND dispatch_state='dispatch_started'", params![join_session_id.to_string(), confirmation.credential_id.to_string(), confirmation.confirmed_at.timestamp_millis()])?;
+            if changed != 1 {
+                return Err(StateError::Conflict("N4 confirmation dispatch fence changed".into()));
+            }
+            tx.execute("INSERT INTO n4_provider_credential_metadata (credential_id,join_session_id,network_id,provider_instance_id,provider_principal_id,single_use,reusable,ephemeral,approved_tags_json,expires_at_ms,confirmed_at_ms,invalidation_state,safe_correlation_json) VALUES (?1,?2,?3,?4,?5,1,0,?6,?7,?8,?9,'active',?10)", params![confirmation.credential_id.to_string(), join_session_id.to_string(), network, instance, confirmation.provider_principal_id, i64::from(confirmation.ephemeral), serde_json::to_string(&confirmation.approved_tags)?, confirmation.expires_at.timestamp_millis(), confirmation.confirmed_at.timestamp_millis(), confirmation.safe_correlation.n4_digest_json()?])?;
+            invitation.state = nodescale_domain::InvitationState::Consumed; invitation.provider_credential_reference = Some(confirmation.credential_id);
+            tx.execute("UPDATE invitations SET state='consumed',provider_credential_reference=?2,record_json=?3 WHERE invitation_id=?1", params![invitation_id, confirmation.credential_id.to_string(), serde_json::to_string(&invitation)?])?;
+            tx.execute("UPDATE n4_invitation_details SET consumed_at_ms=?2,revision=revision+1 WHERE invitation_id=?1", params![invitation_id, confirmation.confirmed_at.timestamp_millis()])?;
+            let mut session: JoinSession = serde_json::from_str(&session_record)?; session.advance_n4(JoinSessionState::ProviderCredentialIssued, confirmation.confirmed_at).map_err(|e| StateError::Conflict(e.to_string()))?;
+            tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, confirmation.confirmed_at.to_rfc3339()])?;
+            let action_id = format!("credential-confirm:{join_session_id}");
+            store.append_n4_audit(tx, nodescale_domain::InvitationId::parse(&invitation_id).map_err(|e| StateError::Conflict(e.to_string()))?, Some(join_session_id), &action_id, actor.clone(), "invitation_redeemed", "success", &SanitizedMetadata::empty())?;
+            store.append_n4_audit(tx, nodescale_domain::InvitationId::parse(&invitation_id).map_err(|e| StateError::Conflict(e.to_string()))?, Some(join_session_id), &action_id, actor, "provider_join_credential_issued", "success", &SanitizedMetadata::empty())?;
+            Ok(())
+        })
+    }
+
+    pub fn fail_n4_credential_dispatch(
+        &self,
+        join_session_id: JoinSessionId,
+        failure: N4DispatchFailure,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<(), StateError> {
+        self.transactional(|tx, store| {
+            let (session_record, invitation_record, invitation_id, _network, dispatch_state): (String,String,String,String,String) = tx.query_row("SELECT s.record_json,i.record_json,d.invitation_id,d.network_id,d.dispatch_state FROM n4_join_session_dispatches d JOIN join_sessions s ON s.join_session_id=d.join_session_id JOIN invitations i ON i.invitation_id=d.invitation_id WHERE d.join_session_id=?1", [join_session_id.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or_else(|| StateError::NotFound(join_session_id.to_string()))?;
+            let expected = match failure { N4DispatchFailure::PreDispatch => "reserved", N4DispatchFailure::DefiniteNoApply | N4DispatchFailure::Ambiguous => "dispatch_started" }; if dispatch_state != expected { return Err(StateError::Conflict("N4 failure conflicts with dispatch fence".into())); }
+            let mut invitation: Invitation = serde_json::from_str(&invitation_record)?; invitation.state = nodescale_domain::InvitationState::Failed;
+            let mut session: JoinSession = serde_json::from_str(&session_record)?; session.advance_n4(match failure { N4DispatchFailure::PreDispatch | N4DispatchFailure::DefiniteNoApply => JoinSessionState::Failed, N4DispatchFailure::Ambiguous => JoinSessionState::ProviderCredentialAmbiguous }, now).map_err(|e| StateError::Conflict(e.to_string()))?;
+            tx.execute("UPDATE invitations SET state='failed',record_json=?2 WHERE invitation_id=?1", params![invitation_id, serde_json::to_string(&invitation)?])?;
+            tx.execute("UPDATE join_sessions SET state=?2,record_json=?3,updated_at=?4 WHERE join_session_id=?1", params![join_session_id.to_string(), lower(session.state.as_str()), serde_json::to_string(&session)?, now.to_rfc3339()])?;
+            tx.execute("UPDATE n4_join_session_dispatches SET dispatch_state=?2,resolved_at_ms=?3 WHERE join_session_id=?1", params![join_session_id.to_string(), match failure { N4DispatchFailure::PreDispatch => "failed_pre_dispatch", N4DispatchFailure::DefiniteNoApply => "failed_no_apply", N4DispatchFailure::Ambiguous => "ambiguous" }, now.timestamp_millis()])?;
+            store.append_n4_audit(tx, nodescale_domain::InvitationId::parse(&invitation_id).map_err(|e| StateError::Conflict(e.to_string()))?, Some(join_session_id), &format!("credential-failure:{join_session_id}"), actor, "invitation_redemption_failed", "failed", &SanitizedMetadata::empty())?;
+            Ok(())
         })
     }
 
@@ -603,6 +1288,8 @@ impl StateStore {
         actor: AuditActor,
     ) -> Result<(), StateError> {
         self.transactional(|tx, store| {
+            let n4_owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM n4_join_session_dispatches WHERE join_session_id=?1)", [join_session_id.to_string()], |row| row.get(0))?;
+            if n4_owned { return Err(StateError::Conflict("N4 join sessions require fenced lifecycle APIs".into())); }
             let record = tx.query_row(
                 "SELECT record_json FROM join_sessions WHERE join_session_id=?1",
                 [join_session_id.to_string()],
@@ -1282,6 +1969,9 @@ impl StateStore {
             "SELECT metadata_json || event_kind || actor_source || COALESCE(actor_id,'') FROM audit_events",
             "SELECT server_url || opaque_secret_reference || compatibility_pin || COALESCE(last_failure_detail,'') FROM provider_imports",
             "SELECT stable_key_fingerprint || semantic_fingerprint || normalized_json FROM provider_observations",
+            "SELECT provider_principal_id || roles_json || constraints_json || last_redemption_metadata_json FROM n4_invitation_details",
+            "SELECT provider_principal_id || create_request_id || COALESCE(configuration_fingerprint,'') FROM n4_join_session_dispatches",
+            "SELECT provider_principal_id || approved_tags_json || safe_correlation_json FROM n4_provider_credential_metadata",
         ] {
             let mut statement = connection.prepare(query)?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
@@ -1392,6 +2082,42 @@ impl StateStore {
             }
             Err(error) => Err(error),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_n4_audit(
+        &self,
+        tx: &Transaction<'_>,
+        invitation_id: nodescale_domain::InvitationId,
+        join_session_id: Option<JoinSessionId>,
+        action_id: &str,
+        actor: AuditActor,
+        kind: &str,
+        outcome: &str,
+        metadata: &SanitizedMetadata,
+    ) -> Result<bool, StateError> {
+        if self.fail_before_audit.get()
+            || (self.fail_before_n4_confirmation_audit.get() && kind == "invitation_redeemed")
+        {
+            return Err(StateError::InjectedFailure);
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM n4_audit_correlations WHERE action_id=?1 AND event_kind=?2)",
+            params![action_id, kind],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(false);
+        }
+        let network_id: String = tx.query_row(
+            "SELECT network_id FROM n4_invitation_details WHERE invitation_id=?1",
+            [invitation_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let event_id = AuditEventId::new();
+        tx.execute("INSERT INTO audit_events (event_id,timestamp,network_id,device_id,actor_source,actor_id,event_kind,outcome,generation,metadata_json) VALUES (?1,?2,?3,NULL,?4,?5,?6,?7,NULL,?8)", params![event_id.to_string(), Utc::now().to_rfc3339(), network_id, actor.source, actor.actor_id, kind, outcome, metadata.json()?])?;
+        tx.execute("INSERT INTO n4_audit_correlations (event_id,invitation_id,join_session_id,action_id,event_kind) VALUES (?1,?2,?3,?4,?5)", params![event_id.to_string(), invitation_id.to_string(), join_session_id.map(|id| id.to_string()), action_id, kind])?;
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1721,6 +2447,24 @@ fn parse_policy_mode(value: &str) -> Result<MutationPolicyMode, StateError> {
             "invalid policy mode",
         )),
     }
+}
+fn safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+}
+fn n4_approved_tag(value: &str) -> bool {
+    matches!(
+        value,
+        "tag:nodescale-node"
+            | "tag:nodescale-worker"
+            | "tag:nodescale-controller"
+            | "tag:nodescale-profile-host"
+            | "tag:nodescale-observer"
+            | "tag:nodescale-admin"
+    )
 }
 fn lower(value: &str) -> String {
     value.to_ascii_lowercase()

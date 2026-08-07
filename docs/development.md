@@ -26,7 +26,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_public_hygiene.py --repo "$(pwd)
 - `chrono`: UTC timestamps with serialization.
 - `uuid`: opaque strongly typed Nodescale-owned identifiers.
 - `thiserror`: typed domain, state, and provider failures.
-- `sha2`: one-way invitation verifier foundation.
+- `sha2`: stable non-secret fingerprints for provider/runtime evidence.
+- `argon2`, `rand`, and `base64`: fixed-profile salted invitation verification and opaque 256-bit token generation.
 - `rusqlite` with bundled SQLite: small synchronous transactional state layer with no runtime/framework.
 - `async-trait`: narrow object-safe asynchronous read boundary shared by real and fake providers.
 - `reqwest` with Rustls: HTTPS-only real-provider reads, URL/origin validation, normal certificate verification, and bounded requests.

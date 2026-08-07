@@ -1,5 +1,5 @@
 [package]
-name = "nodescale-provider-headscale"
+name = "nodescale-invitation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,23 +7,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 chrono.workspace = true
 nodescale-domain = { path = "../nodescale-domain" }
 nodescale-provider = { path = "../nodescale-provider" }
 nodescale-state = { path = "../nodescale-state" }
-reqwest = { workspace = true, features = ["json"] }
-semver.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
-zeroize.workspace = true
-x509-parser.workspace = true
 
 [dev-dependencies]
-nodescale-invitation = { path = "../nodescale-invitation" }
-rcgen.workspace = true
+async-trait.workspace = true
+nodescale-provider-fake = { path = "../nodescale-provider-fake" }
+tempfile = "3"
 tokio.workspace = true
 
 [lints]

@@ -1,25 +1,45 @@
 use chrono::{Duration, Utc};
 use nodescale_domain::{
-    AuditActor, Generation, Network, NetworkId, ProviderApiKey, ProviderCredentialId,
-    ProviderInstanceId, ProviderKind,
+    AuditActor, Generation, InvitationToken, JoinConstraints, Network, NetworkId, ProviderApiKey,
+    ProviderInstanceId, ProviderKind, Role, Roles,
+};
+use nodescale_invitation::{
+    CreateInvitationRequest, InvitationService, InvitationServiceError, RedeemInvitationRequest,
 };
 use nodescale_provider::{
-    IssuedJoinCredential, JoinCredentialRequest, MutationEvidence, MutationOutcome,
-    MutationPolicyMode, MutationProvider, ProviderMutation, ProviderMutationCapability,
+    MutationEvidence, MutationOutcome, MutationPolicyMode, MutationProvider, ProviderMutation,
+    ProviderMutationCapability, ReadOnlyProvider,
 };
 use nodescale_provider_headscale::{
     HeadscaleClientOptions, HeadscaleCustomRootCa, HeadscaleMutationProvider,
     HeadscaleMutationTransport, HeadscaleProvider,
 };
 use nodescale_state::{
-    ConfirmedProviderCredentialReference, HeadscaleImportConfig, ProviderMutationConfiguration,
-    StateStore, TlsVerificationPolicy,
+    HeadscaleImportConfig, N4PresentedMetadata, ProviderMutationConfiguration, StateStore,
+    TlsVerificationPolicy,
 };
 
 const FINGERPRINT: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("ignored disposable proof requires {name}"))
+}
+
+fn assert_secret_absent_from_state_files(path: &std::path::Path, secret: &str) {
+    for candidate in [
+        path.to_path_buf(),
+        std::path::PathBuf::from(format!("{}-wal", path.display())),
+        std::path::PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        if candidate.exists() {
+            let bytes = std::fs::read(candidate).unwrap();
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+            );
+        }
+    }
 }
 
 fn loopback_https_endpoint(endpoint: &str) -> Result<reqwest::Url, &'static str> {
@@ -65,11 +85,12 @@ fn disposable_proof_endpoint_is_strictly_loopback() {
 /// owns image provenance, before/after host invariants, and resource cleanup.
 #[tokio::test]
 #[ignore = "requires disposable loopback Headscale v0.29.3 with verified custom-root TLS"]
-async fn disposable_headscale_tls_principal_and_credential_lifecycle() {
+async fn disposable_headscale_tls_invitation_service_lifecycle() {
     let endpoint = required_env("NODESCALE_PROOF_HEADSCALE_URL");
     loopback_https_endpoint(&endpoint).unwrap();
     let api_key = required_env("NODESCALE_PROOF_HEADSCALE_API_KEY");
     let root_ca = std::fs::read(required_env("NODESCALE_PROOF_HEADSCALE_CA_FILE")).unwrap();
+    let state_path = std::path::PathBuf::from(required_env("NODESCALE_PROOF_STATE_DB"));
 
     let instance = ProviderInstanceId::new();
     let network = Network::new(
@@ -88,7 +109,7 @@ async fn disposable_headscale_tls_principal_and_credential_lifecycle() {
         HeadscaleCustomRootCa::PemBytes(root_ca.clone()),
     )
     .unwrap();
-    let store = StateStore::open_in_memory().unwrap();
+    let store = StateStore::open(&state_path).unwrap();
     store
         .import_headscale_network(
             &network,
@@ -106,6 +127,7 @@ async fn disposable_headscale_tls_principal_and_credential_lifecycle() {
         )
         .await
         .unwrap();
+    assert!(read_provider.list_nodes().await.unwrap().is_empty());
 
     let now = Utc::now();
     store
@@ -129,7 +151,6 @@ async fn disposable_headscale_tls_principal_and_credential_lifecycle() {
                     ProviderMutationCapability::EnsureNetworkPrincipal,
                     ProviderMutationCapability::CreateJoinCredential,
                     ProviderMutationCapability::InvalidateJoinCredential,
-                    ProviderMutationCapability::ManagePolicy,
                 ],
             )
             .unwrap(),
@@ -184,119 +205,84 @@ async fn disposable_headscale_tls_principal_and_credential_lifecycle() {
         other => panic!("principal proof did not confirm: {other:?}"),
     };
 
-    let mut request = JoinCredentialRequest::single_use(principal_id);
-    request.expires_at = Some(Utc::now() + Duration::minutes(15));
-    let credential_outcome = mutation_provider
-        .execute_mutation(
-            store
-                .issue_mutation_authorization(
-                    network.network_id,
-                    instance,
-                    ProviderMutationCapability::CreateJoinCredential,
-                    Utc::now(),
-                )
-                .unwrap(),
-            ProviderMutation::CreateJoinCredential { request },
-        )
-        .await;
-    let IssuedJoinCredential {
-        provider_reference,
-        secret,
-        expires_at,
-        max_uses,
-    } = match credential_outcome {
-        MutationOutcome::Confirmed {
-            evidence: MutationEvidence::JoinCredentialIssued(issued),
-        } => issued,
-        other => panic!("credential proof did not confirm: {other:?}"),
-    };
-    drop(secret);
-
-    let credential_id = ProviderCredentialId::new();
-    store
-        .record_confirmed_provider_credential_reference(
-            &ConfirmedProviderCredentialReference::new(
-                credential_id,
-                network.network_id,
-                instance,
-                provider_reference.clone(),
-                Generation::initial(),
-                Generation::initial(),
-                FINGERPRINT,
-                Utc::now(),
-                expires_at,
-                max_uses,
-            )
-            .unwrap(),
-            AuditActor::system(),
+    let invitation_service = InvitationService::new(&store, &mutation_provider, &store);
+    let issued = invitation_service
+        .create(
+            CreateInvitationRequest {
+                network_id: network.network_id,
+                provider_instance_id: instance,
+                provider_principal_id: principal_id,
+                roles: Roles::new([Role::Worker]).unwrap(),
+                admin_intent: None,
+                join_constraints: JoinConstraints::default(),
+                actor: AuditActor::system(),
+            },
+            Utc::now(),
         )
         .unwrap();
+    let invitation_id = issued.view().invitation_id;
+    let (_, invitation_token) = issued.deliver_token(str::to_owned);
+    assert!(
+        !store
+            .database_text_dump_for_test()
+            .unwrap()
+            .contains(&invitation_token)
+    );
+    assert_secret_absent_from_state_files(&state_path, &invitation_token);
+    let delivery = invitation_service
+        .redeem(
+            RedeemInvitationRequest {
+                token: invitation_token.parse::<InvitationToken>().unwrap(),
+                presented: N4PresentedMetadata::default(),
+                actor: AuditActor::system(),
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let (receipt, ()) = delivery.deliver_once(|provider_secret| {
+        assert_secret_absent_from_state_files(&state_path, provider_secret);
+    });
+    assert_eq!(receipt.invitation_id, invitation_id);
+    assert_eq!(receipt.max_uses, 1);
+    assert_eq!(
+        invitation_service.show(invitation_id).unwrap().state,
+        nodescale_domain::InvitationState::Consumed
+    );
+    let durable_reference = store
+        .confirmed_provider_credential_reference(receipt.credential_id)
+        .unwrap();
+    let replay = invitation_service
+        .redeem(
+            RedeemInvitationRequest {
+                token: invitation_token.parse::<InvitationToken>().unwrap(),
+                presented: N4PresentedMetadata::default(),
+                actor: AuditActor::system(),
+            },
+            Utc::now(),
+        )
+        .await;
+    assert_eq!(replay.unwrap_err(), InvitationServiceError::Conflict);
     assert_eq!(
         store
-            .confirmed_provider_credential_reference(credential_id)
+            .confirmed_provider_credential_reference(receipt.credential_id)
             .unwrap()
             .provider_reference,
-        provider_reference
+        durable_reference.provider_reference
     );
-
-    let invalidate_outcome = mutation_provider
-        .execute_mutation(
-            store
-                .issue_mutation_authorization(
-                    network.network_id,
-                    instance,
-                    ProviderMutationCapability::InvalidateJoinCredential,
-                    Utc::now(),
-                )
-                .unwrap(),
-            ProviderMutation::RevokeJoinCredential {
-                credential: provider_reference,
-            },
-        )
-        .await;
-    match invalidate_outcome {
-        MutationOutcome::Confirmed {
-            evidence: MutationEvidence::CredentialRevoked { .. },
-        }
-        | MutationOutcome::AlreadySatisfied {
-            evidence: MutationEvidence::CredentialRevoked { .. },
-        } => {}
-        other => panic!("credential invalidation did not confirm: {other:?}"),
-    }
-
-    let before_policy = mutation_provider.inspect_policy().await.unwrap();
-    let replacement_policy = if before_policy.policy.trim() == r#"{"acls":[]}"# {
-        r#"{"acls":[],"groups":{}}"#.to_owned()
-    } else {
-        r#"{"acls":[]}"#.to_owned()
-    };
-    let policy_outcome = mutation_provider
-        .execute_mutation(
-            store
-                .issue_mutation_authorization(
-                    network.network_id,
-                    instance,
-                    ProviderMutationCapability::ManagePolicy,
-                    Utc::now(),
-                )
-                .unwrap(),
-            ProviderMutation::ApplyPolicy {
-                expected_revision: before_policy.revision,
-                policy: replacement_policy.clone(),
-            },
-        )
-        .await;
-    assert!(matches!(
-        policy_outcome,
-        MutationOutcome::Confirmed {
-            evidence: MutationEvidence::PolicyMatches { .. }
-        }
-    ));
+    let revoked = invitation_service
+        .revoke(invitation_id, Utc::now(), AuditActor::system())
+        .await
+        .unwrap();
+    assert_eq!(revoked.state, nodescale_domain::InvitationState::Revoked);
     assert_eq!(
-        mutation_provider.inspect_policy().await.unwrap().policy,
-        replacement_policy
+        revoked.cleanup_state,
+        nodescale_state::N4CleanupState::Confirmed
     );
+    assert_secret_absent_from_state_files(&state_path, &invitation_token);
+
     assert_eq!(store.device_count(network.network_id).unwrap(), 0);
     assert_eq!(store.keryx_binding_count(network.network_id).unwrap(), 0);
     assert_eq!(store.fleet_projection_count(network.network_id).unwrap(), 0);
+    assert!(read_provider.list_nodes().await.unwrap().is_empty());
 }

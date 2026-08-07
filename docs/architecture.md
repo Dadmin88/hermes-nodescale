@@ -67,6 +67,31 @@ create a Keryx binding or activate Hermes Fleet enrollment, grants, scheduling,
 or execution. Those remain independently gated on their stated provenance,
 local-control, and acceptance-test contracts.
 
+## N4A invitation and join-session boundary
+
+N4A composes the N3A credential primitives behind `InvitationService`. The
+service issues opaque single-use invitations, reserves durable join sessions in
+SQLite, and dispatches provider credential creation only after the reservation
+commits. Invitation selectors carry no claims; typed roles are bounded
+eligibility and approved-tag intent only. Administrative eligibility requires
+explicit elevated intent.
+
+Creation certainty is asymmetric: a possibly-applied request whose plaintext
+credential was not recovered becomes terminal and cannot be blindly retried.
+Invalidation carries no new secret, so ambiguous revocation or expiry remains
+nonterminal and may be reconciled against the exact provider reference. Terminal
+cleanup requires confirmed or already-satisfied provider evidence.
+
+The production-path disposable proof exercised invitation creation, redemption,
+replay rejection, and revocation through the real Headscale v0.29.3 adapter. It
+used file-backed state and verified that invitation and provider plaintext were
+absent from the database files. Provider node inventory and all Nodescale trust
+counters remained zero.
+
 ## Explicitly deferred
 
-No server, agent, CLI, Keryx adapter, Fleet adapter, privileged helper, web console, deployment tooling, distributed consensus, invitation flow, device joining, or live activation is added by N3A.
+No server, agent, CLI, Keryx adapter, Fleet adapter, privileged helper, web
+console, deployment tooling, distributed consensus, device join, authenticated
+agent-to-provider-node correlation, or live activation is added by N4A.
+Transporting invitations to clients and exposing operator-facing invitation APIs
+also remain separate work.
