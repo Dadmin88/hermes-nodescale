@@ -2,28 +2,48 @@
 
 ## Import boundary
 
-N2A imports an explicitly configured existing Headscale provider. The operator supplies a Nodescale network name, the Headscale HTTPS origin, an expected provider-instance identity, the selected compatibility pin, a TLS verification policy, and an opaque `secret://` credential reference. Nodescale inspects the provider, verifies the instance and pinned version, reads the initial node snapshot, and atomically persists the Nodescale network, sanitized provider configuration, normalized observations, and audit records.
+Nodescale can import an explicitly configured existing Headscale provider in read-only mode. The operator supplies:
 
-API credentials are injected at runtime by the provider adapter. Plaintext API credentials are not accepted by the import model and are never stored in SQLite. Headscale imports are permanently read-only in N2A: `read_only = true` and `mutation_allowed = false`.
+- a Nodescale network name;
+- the Headscale HTTPS origin;
+- the expected provider-instance identity;
+- the selected compatibility pin;
+- a TLS verification policy;
+- an opaque `secret://` credential reference.
 
-Networks are never inferred from node hostnames, display names, or addresses.
+Nodescale inspects the provider, verifies its identity and compatibility, reads the initial node snapshot, and atomically persists the Nodescale network, sanitized provider configuration, normalized observations, and audit records.
+
+Provider API credentials are injected at runtime by the adapter. Plaintext API credentials are not part of the import model and are never stored in SQLite.
+
+Read-only imports remain explicitly marked `read_only = true` and `mutation_allowed = false`. Mutation authorization is configured separately and cannot be inferred from a successful import.
+
+Networks are never inferred from node hostnames, display names, tags, or addresses.
 
 ## Observation is not identity or trust
 
-A provider observation is timestamped evidence about a canonical provider-local Headscale node ID. It preserves the strongest available machine-key fingerprint plus mutable node-key, disco-key, hostname, address, tag, user, registration, last-seen, expiry, online, and sanitized pre-auth correlation evidence from the provider-neutral record.
+A provider observation is timestamped evidence about a canonical provider-local Headscale node ID. It may include:
 
-Observations are stored separately from Nodescale `Device` records. Hostname, display-name, and address collisions never merge observations. A canonical Headscale node ID paired with incompatible machine-key evidence is classified as `identity_conflict`; the prior strong identity and historical evidence are preserved.
+- machine-key fingerprint;
+- node and disco keys;
+- hostname and given name;
+- addresses;
+- tags;
+- user metadata;
+- registration, last-seen, expiry, and online state;
+- sanitized pre-auth credential correlation evidence.
 
-**A Headscale node appearing in Nodescale discovery does not make it a trusted Hermes Fleet node.**
+Observations are stored separately from Nodescale `Device` records. Hostname, display-name, and address collisions never merge devices.
 
-Discovery creates no Nodescale device credential, authenticated Keryx binding, Hermes Fleet projection, Fleet grant, execution permission, or trusted `Active` state. Adoption is modeled only as staging pending Nodescale device-credential proof and cannot bypass either later gate.
+A canonical Headscale node ID paired with incompatible machine-key evidence is classified as an identity conflict. Prior strong identity evidence and historical observations are preserved rather than silently replaced.
+
+A discovered provider node does not create a Nodescale device credential, verified Keryx binding, Hermes Fleet enrollment, Fleet grant, execution permission, or trusted active state.
 
 ## Classifications
 
 Persisted observations use explicit classifications:
 
 - `expected_joining`
-- `discovered_unmanaged` (the default for every previously unknown provider node)
+- `discovered_unmanaged`
 - `active`
 - `provider_missing`
 - `provider_expired`
@@ -32,29 +52,51 @@ Persisted observations use explicit classifications:
 - `quarantined`
 - `revoked`
 
-N2A does not create trusted active records. The additional states exist so later lifecycle packets can preserve one vocabulary without weakening the N0C activation gate.
+New previously unknown provider nodes default to `discovered_unmanaged` unless stronger managed-state evidence exists.
+
+The vocabulary includes trusted lifecycle states so later activation logic can use one model, but discovery itself does not create trusted `active` membership.
 
 ## Reconciliation
 
-A one-shot reconciliation cycle:
+A reconciliation cycle:
 
-1. loads the persisted read-only import configuration;
+1. loads the persisted provider configuration;
 2. inspects compatibility and provider-instance identity;
-3. lists and deterministically sorts the complete provider snapshot by canonical node ID;
-4. rejects duplicate canonical IDs or mismatched provider instances before applying state;
-5. compares normalized provider truth with prior observations;
-6. classifies discoveries, mutable metadata changes, expiry, disappearance, and strong-identity conflict;
-7. commits observation changes, classifications, provider freshness, and semantic audit events in one SQLite transaction;
-8. returns a sanitized doctor report.
+3. reads the complete provider snapshot;
+4. normalizes and deterministically sorts observations by canonical provider node ID;
+5. rejects duplicate canonical IDs or mismatched provider instances before state changes are applied;
+6. compares provider truth with prior observations;
+7. classifies discoveries, mutable metadata changes, expiry, disappearance, and strong-identity conflicts;
+8. atomically commits observations, classifications, freshness state, and semantic audit events;
+9. returns a sanitized diagnostic report.
 
-A repeated cycle against unchanged provider truth does not change trust, generations, classifications, semantic fingerprints, or audit history. Poll timestamps may refresh observation freshness. Missing unmanaged observations are retained and classified `provider_missing` rather than deleted.
+Repeating reconciliation against unchanged provider truth does not change trust, semantic classifications, content identity, or generations. Poll timestamps may still refresh freshness information.
+
+Missing unmanaged observations are retained and classified `provider_missing` rather than deleted.
 
 ## Outage and failure behavior
 
-Provider unreachable, authentication failure, incompatible version, malformed response, identity conflict, and local state failure are distinct outcomes. A failed provider read preserves the last successful inventory and does not mark every node missing or removed. The persisted doctor report records the failed attempt and health state while retaining the last successful reconciliation timestamp.
+Nodescale distinguishes provider unreachability, authentication failure, incompatible versions, malformed responses, identity conflicts, and local state failures.
 
-No failure path grants trust, deletes membership, enables provider mutation, or creates Fleet authority. Recovery after a temporary outage applies the next successful complete snapshot normally.
+A failed provider read:
 
-## Doctor report
+- preserves the last successful inventory;
+- does not mark every node missing or removed;
+- updates provider health and the failed-attempt timestamp;
+- preserves the last successful reconciliation timestamp.
 
-The library report exposes the Nodescale network ID, provider state and compatibility, provider version, last attempt and last success timestamps, observed/unmanaged/missing/expired/conflict/quarantined/active counts, sanitized warnings, and `provider_mutation_enabled = false`. It contains no provider credential material.
+No failure path grants trust, deletes membership, enables provider mutation, or creates Hermes Fleet authority.
+
+## Diagnostic report
+
+The reconciliation report exposes sanitized operational state such as:
+
+- Nodescale network ID;
+- provider health and compatibility;
+- provider version;
+- last attempt and last successful reconciliation timestamps;
+- observed, unmanaged, missing, expired, conflict, quarantined, and active counts;
+- bounded warnings;
+- provider mutation state.
+
+The report contains no provider credential material.

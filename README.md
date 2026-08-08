@@ -1,111 +1,85 @@
 # Nodescale
 
-Nodescale is a small private-device membership and identity control plane for Hermes Fleet. This repository contains the accepted N0C Rust foundation, the N1A/N2A read-only Headscale import and reconciliation path, the N3A capability-separated Headscale mutation provider, the N4A invitation/join-session service, and the N4B bounded redemption ingress.
+Nodescale is the membership and identity control plane for Hermes Fleet. It manages private-device membership, provider-backed join flows, identity state, reconciliation, and revocation without treating mesh connectivity as application authorization.
 
-## Status
+> **Mesh membership is not application authorization.** A device appearing in Headscale does not make it a trusted Hermes Fleet node.
 
-N2A can import explicit read-only Headscale configuration, perform discovery, persist normalized provider observations, reconcile drift and conflicts, and expose sanitized doctor inventory. N3A adds separately configured, state-authorized provider mutation primitives for the exact clean Headscale v0.29.3 pin. N4A adds opaque single-use invitations, durable join sessions, and exactly-once coupling to bounded provider credentials. N4B adds a single verified-TLS redemption route plus an exact-tree disposable Tailscale/Headscale acceptance harness. A completed join claim requires the harness's external evidence manifest for the exact candidate tree; source presence alone is not execution evidence. N4B does **not** deploy production Headscale, bind Keryx identities, activate trusted membership, or project trust into Hermes Fleet.
+## What Nodescale provides
 
-**A Headscale node appearing in Nodescale discovery does not make it a trusted Hermes Fleet node.**
+- **Provider discovery and reconciliation** for explicitly configured Headscale networks.
+- **Normalized provider identity** that keeps provider, Nodescale, and Keryx identities distinct.
+- **Capability-scoped provider mutation** for narrowly authorized operations such as bounded join credentials, exact node updates, and policy management where supported.
+- **Single-use invitations and durable join sessions** backed by SQLite transactions and replay-resistant state transitions.
+- **A bounded TLS redemption ingress** for exchanging an invitation token for one-time provider bootstrap material.
+- **Durable lifecycle and audit state** with monotonic generations, explicit uncertainty handling, and secret-safe records.
 
-- Current Hermes Fleet implementation: Python prototype and behavioral reference.
-- Planned future Hermes Fleet implementation: Rust.
-- Both are the same product: **Hermes Fleet**.
+Nodescale is intentionally conservative around trust. Provider observations, hostnames, tags, addresses, pre-auth-key associations, and invitation possession are evidence, not proof of Hermes Fleet authorization.
 
-Trusted activation remains gated on authenticated Keryx sender provenance and a stable Hermes Fleet managed-state contract with acceptance tests.
+## Trust boundaries
 
-## N3A mutation boundary
+Nodescale sits between four distinct authorities:
 
-N3A is implemented as a separate associated-type mutation boundary. Existing
-imports remain `read_only = true` and `mutation_allowed = false`; they cannot
-issue mutation authority. An owner must create a separate versioned state
-configuration for an exact network/provider instance and exact capability set.
-The complete provider surface is deliberately narrow:
+| Component | Authority |
+| --- | --- |
+| Mesh provider | Mesh admission, node reachability, provider identity, tags, and network policy. |
+| Nodescale | Managed membership, Nodescale device identity, roles, lifecycle, generations, and desired application-state intent. |
+| Keryx | Authenticated application-transport peer identity and runtime provenance. |
+| Hermes Fleet | Final application authorization, scheduling, local policy, and execution. |
 
-- ensure one named network principal;
-- create a join credential bounded to that principal, explicit expiry, and
-  bounded use count, then invalidate that exact credential;
-- set the complete desired tag set, expire, or delete one exact provider node;
-- read or apply provider policy **only** in a separately verified database
-  mode.
+Trusted activation requires the relevant identities and policies to agree. Provider admission alone cannot activate a device, create a verified Keryx binding, or grant Hermes Fleet operations.
 
-Each item is an independent capability, not a consequence of a role, version,
-or server route. A transport acknowledgement is not success: the provider
-returns an explicit rejected/unsupported/ambiguous outcome or requires an
-authoritative read-back that proves the requested state. It does not assume
-provider compare-and-swap (CAS) support. Join-credential plaintext is delivery-only
-and does not enter SQLite, logs, diagnostics, or audit metadata; state stores
-only a confirmed redacted provider reference. The disposable proof verified
-custom-root TLS, exact clean runtime evidence, principal ensure, bounded
-credential creation/invalidation, and database policy replacement. Node tag,
-expiry, and deletion remain deterministic loopback contract evidence because
-the proof was prohibited from joining a node. N3A does not create trusted membership,
-Keryx bindings, or Hermes Fleet enrollment, grants, scheduling, or activation.
+## Current scope
 
-## N4A invitation boundary
+The repository currently includes:
 
-N4A issues an opaque selector plus a 256-bit random secret and persists only an
-Argon2id verifier and safe metadata. A successful presentation atomically
-reserves one invitation and one durable join session before dispatching one
-provider credential creation. The provider credential is single-use,
-non-ephemeral, bounded by invitation expiry, and tagged only from the typed role
-vocabulary. Invitation and provider plaintext are delivered through consuming,
-redacted APIs and never enter SQLite or audit metadata.
+- a Rust workspace with domain, state, provider, invitation, and redemption-ingress crates;
+- read-only Headscale discovery and reconciliation;
+- a Headscale mutation adapter with operation-specific authorization;
+- opaque single-use invitation issuance and redemption;
+- verified-TLS `POST /v1/redemptions` ingress with bounded admission and worker concurrency;
+- deterministic fake-provider and loopback test infrastructure;
+- disposable Headscale/Tailscale acceptance tooling for provider-join verification.
 
-SQLite transactions and compare-and-swap predicates reject replay across
-connections. A possibly-applied creation whose secret is unavailable is never
-retried. Revocation and expiry invalidate the exact provider reference and stay
-nonterminal when provider certainty is ambiguous. The disposable production
-proof exercised create, redeem, replay rejection, and revoke through the real
-Headscale v0.29.3 adapter while provider-node and all trusted-activation counters
-remained zero. A real device join was explicitly deferred from N4A.
-
-## N4B redemption-ingress boundary
-
-N4B exposes only `POST /v1/redemptions`. The strict JSON body contains one
-opaque invitation token; URLs, query strings, headers, cookies, forwarded peer
-claims, hostnames, and client-supplied audit identities cannot carry or augment
-the capability. Possession authenticates redemption but does not authenticate a
-device or agent identity.
-
-Per-source and global monotonic token buckets run before parsing or Argon2 work,
-with a bounded source table and worker queue. A dedicated single-thread worker
-owns `StateStore`, `InvitationService`, and provider authority, bounding Argon2
-and provider creation concurrency to one while SQLite remains the exactly-once
-security boundary across processes. The successful response contains only the
-validated Headscale login origin, optional public CA material, and the consuming
-one-time provider credential. Errors and caches cannot expose invitation state.
-
-The retained acceptance harness must race two isolated redeemers, accept exactly one, reject
-replay, and run a pinned Tailscale v1.98.10 userspace client with no capabilities,
-TUN device, host socket, or host network. Headscale v0.29.3 observes exactly one
-node whose pre-auth ID matches the durable credential reference. That is provider
-credential association only—not trusted device identity. The client is stopped,
-the exact credential is revoked through `InvitationService`, the exact node is
-deleted. Acceptance requires exact-tree evidence of zero runtime residue, unchanged
-repository and host-network invariants, and separately reported retained image cache.
+The current implementation stops short of trusted Hermes Fleet activation. Authenticated Keryx binding and managed Fleet projection remain separate integration boundaries.
 
 ## Workspace
 
-- `crates/nodescale-domain` — typed identities, models, generations, secret wrappers, and pure state machines.
-- `crates/nodescale-state` — exclusive SQLite schema, read-only imports, explicit mutation configuration and single-use authorization, reconciliation inventory, generations, revocation tombstones, and structured audit events.
-- `crates/nodescale-provider` — normalized provider models plus separate async read-only and capability-separated mutation contracts.
-- `crates/nodescale-provider-fake` — deterministic in-memory provider for tests.
-- `crates/nodescale-provider-headscale` — real HTTPS Headscale v0.29.3 inspection and explicitly authorized mutation adapters.
-- `crates/nodescale-invitation` — opaque invitation issuance, durable redemption, one-time provider-credential delivery, and conservative cleanup orchestration.
-- `crates/nodescale-redemption-ingress` — bounded verified-TLS capability redemption routed through `InvitationService`.
+| Crate | Purpose |
+| --- | --- |
+| `nodescale-domain` | Typed identities, lifecycle models, generations, secret wrappers, and pure state machines. |
+| `nodescale-state` | SQLite schema, provider imports, mutation authorization state, reconciliation inventory, revocation state, and audit events. |
+| `nodescale-provider` | Provider-neutral models and separate read-only and mutation contracts. |
+| `nodescale-provider-fake` | Deterministic in-memory provider used by tests. |
+| `nodescale-provider-headscale` | HTTPS Headscale adapter for discovery and explicitly authorized mutations. |
+| `nodescale-invitation` | Invitation issuance, durable redemption, one-time provider-credential delivery, and cleanup orchestration. |
+| `nodescale-redemption-ingress` | Bounded verified-TLS invitation redemption transport around `InvitationService`. |
 
 ## Development
 
-```text
+The workspace uses stable Rust and requires `rustfmt` and `clippy`.
+
+```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace
 ```
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/invitations.md`](docs/invitations.md), [`docs/discovery-reconciliation.md`](docs/discovery-reconciliation.md), [`docs/headscale-compatibility.md`](docs/headscale-compatibility.md), [`docs/threat-model.md`](docs/threat-model.md), and [`docs/development.md`](docs/development.md).
+See [Development](docs/development.md) for the full validation workflow and acceptance-test notes.
+
+## Documentation
+
+Start with the [documentation index](docs/README.md), then use the focused references below:
+
+- [Architecture](docs/architecture.md)
+- [Identity model](docs/identity-model.md)
+- [Provider contract](docs/provider-contract.md)
+- [Headscale compatibility](docs/headscale-compatibility.md)
+- [Discovery and reconciliation](docs/discovery-reconciliation.md)
+- [Invitations and redemption](docs/invitations.md)
+- [Threat model](docs/threat-model.md)
+- [Architecture decision records](docs/adr/)
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE).

@@ -15,7 +15,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/DeployFaith/nodescale"
+repository = "https://github.com/Dadmin88/nodescale"
 
 [workspace.dependencies]
 argon2 = "0.5"
