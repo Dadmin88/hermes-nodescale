@@ -17,9 +17,10 @@ The following integrations remain explicitly gated:
 
 - **Keryx binding** requires authenticated non-execution sender provenance supplied by the trusted runtime rather than by the request payload.
 - **Hermes Fleet projection** requires a stable, authenticated, language-neutral local control contract with durable generation, idempotency, conflict, provenance, and read-back semantics.
-- **Trusted device activation** requires both authoritative Keryx binding evidence and successful Fleet projection according to the current managed-state contract.
+- **N5 logical trust state** may be explicitly owner-authorized after authoritative provider correlation, but grants no runtime/application authority.
+- **Live managed-device activation** requires both authoritative Keryx binding evidence and successful Fleet projection according to the current managed-state contract.
 
-Nodescale may model pending or blocked states before these integrations are complete, but it must not synthesize successful trust semantics or mark a device trusted without the required evidence.
+Nodescale may model pending or blocked states before these integrations are complete. N5 may report its narrowly scoped logical trust state, but it must not synthesize Keryx/Fleet evidence or report live/application activation without those external gates.
 
 ## Consequences
 
@@ -29,4 +30,4 @@ Independent parts of Nodescale can evolve without coupling progress to every adj
 
 - Wait for every adjacent integration before implementing independent Nodescale foundations.
 - Stub missing trust dependencies as successful during development.
-- Promote provider admission or caller-supplied identity fields into trusted activation.
+- Promote provider admission or caller-supplied identity fields into logical trust or live activation.

@@ -11,6 +11,7 @@ Nodescale is the membership and identity control plane for Hermes Fleet. It mana
 - **Capability-scoped provider mutation** for narrowly authorized operations such as bounded join credentials, exact node updates, and policy management where supported.
 - **Single-use invitations and durable join sessions** backed by SQLite transactions and replay-resistant state transitions.
 - **A bounded TLS redemption ingress** for exchanging an invitation token for one-time provider bootstrap material.
+- **Authoritative logical-device correlation and explicit Nodescale trust** with provider-backed reconciliation, verifier-only owner authority, one-shot revision-fenced decisions, and append-only audit.
 - **Durable lifecycle and audit state** with monotonic generations, explicit uncertainty handling, and secret-safe records.
 
 Nodescale is intentionally conservative around trust. Provider observations, hostnames, tags, addresses, pre-auth-key associations, and invitation possession are evidence, not proof of Hermes Fleet authorization.
@@ -38,9 +39,11 @@ The repository currently includes:
 - opaque single-use invitation issuance and redemption;
 - verified-TLS `POST /v1/redemptions` ingress with bounded admission and worker concurrency;
 - deterministic fake-provider and loopback test infrastructure;
-- disposable Headscale/Tailscale acceptance tooling for provider-join verification.
+- Nodescale-generated immutable `DeviceId` confirmation from exact N4/provider registration evidence;
+- explicit owner-root-gated logical trust activation/revocation and provider-binding cleanup/reconciliation;
+- disposable Headscale/Tailscale acceptance tooling for provider join plus N5 identity/trust verification.
 
-The current implementation stops short of trusted Hermes Fleet activation. Authenticated Keryx binding and managed Fleet projection remain separate integration boundaries.
+N5 implements explicit Nodescale logical trust without making provider membership equivalent to trust. This is not live/application activation: authenticated Keryx binding and managed Hermes Fleet projection remain separate, unimplemented integration boundaries.
 
 ## Workspace
 
@@ -53,6 +56,7 @@ The current implementation stops short of trusted Hermes Fleet activation. Authe
 | `nodescale-provider-headscale` | HTTPS Headscale adapter for discovery and explicitly authorized mutations. |
 | `nodescale-invitation` | Invitation issuance, durable redemption, one-time provider-credential delivery, and cleanup orchestration. |
 | `nodescale-redemption-ingress` | Bounded verified-TLS invitation redemption transport around `InvitationService`. |
+| `nodescale-device-trust` | State-owned exact provider-registration correlation, explicit owner-authorized Nodescale trust, binding reconciliation, and typed trust queries. |
 
 ## Development
 
@@ -77,11 +81,12 @@ Start with the [documentation index](docs/README.md), then use the focused refer
 - [Headscale compatibility](docs/headscale-compatibility.md)
 - [Discovery and reconciliation](docs/discovery-reconciliation.md)
 - [Invitations and redemption](docs/invitations.md)
+- [Device identity and trust](docs/device-trust.md)
 - [Threat model](docs/threat-model.md)
 - [Architecture decision records](docs/adr/)
 
 ## License
 
-Current versions of Nodescale are licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See [LICENSE](LICENSE).
+Current versions of Nodescale are licensed under the GNU Affero General Public License version 3 only (`AGPL-3.0-only`). See [LICENSE](LICENSE).
 
 Code published in earlier commits under Apache-2.0 remains available under the license terms that applied when it was published.

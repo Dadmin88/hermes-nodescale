@@ -93,6 +93,11 @@ uuid_id!(ProviderInstanceId, "provider instance ID");
 uuid_id!(ProviderCredentialId, "provider credential ID");
 uuid_id!(RevocationId, "revocation ID");
 uuid_id!(AuditEventId, "audit event ID");
+uuid_id!(ProviderBindingId, "provider binding ID");
+uuid_id!(TrustRootId, "trust root ID");
+uuid_id!(TrustAuthorityId, "trust authority ID");
+uuid_id!(TrustDecisionId, "trust decision ID");
+uuid_id!(TrustActionId, "trust action ID");
 
 macro_rules! bounded_string_id {
     ($name:ident, $kind:literal) => {
@@ -303,6 +308,73 @@ transition_enum!(
             | (MembershipState::Revoking, MembershipState::Revoked)
     )
 );
+transition_enum!(
+    DeviceTrustState {
+        Untrusted,
+        Trusted,
+        Revoked
+    },
+    |a, b| matches!(
+        (a, b),
+        (
+            DeviceTrustState::Untrusted,
+            DeviceTrustState::Trusted | DeviceTrustState::Revoked
+        ) | (DeviceTrustState::Trusted, DeviceTrustState::Revoked)
+    )
+);
+transition_enum!(
+    ProviderBindingState {
+        Active,
+        Stale,
+        CleanupPending,
+        Removed
+    },
+    |a, b| matches!(
+        (a, b),
+        (
+            ProviderBindingState::Active,
+            ProviderBindingState::Stale | ProviderBindingState::CleanupPending
+        ) | (
+            ProviderBindingState::Stale,
+            ProviderBindingState::CleanupPending | ProviderBindingState::Removed
+        ) | (
+            ProviderBindingState::CleanupPending,
+            ProviderBindingState::Removed
+        )
+    )
+);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum DeviceTrustCapability {
+    ActivateDeviceTrust,
+    RevokeDeviceTrust,
+}
+impl DeviceTrustCapability {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActivateDeviceTrust => "ActivateDeviceTrust",
+            Self::RevokeDeviceTrust => "RevokeDeviceTrust",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustDecisionKind {
+    Activate,
+    Revoke,
+}
+impl TrustDecisionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::Revoke => "revoke",
+        }
+    }
+}
+
 transition_enum!(
     InvitationState {
         Issued,
@@ -918,7 +990,108 @@ impl FromStr for InvitationToken {
     }
 }
 
-/// A persisted verifier only. It never contains a plaintext invitation token.
+/// Opaque local-owner capability for configuring and using the N5 trust root.
+/// The UUID is lookup-only; authorization always requires the random secret.
+pub struct OwnerTrustRootToken {
+    trust_root_id: TrustRootId,
+    secret: [u8; N4_ARGON_OUTPUT_LEN],
+}
+impl OwnerTrustRootToken {
+    #[must_use]
+    pub fn generate(trust_root_id: TrustRootId) -> Self {
+        let mut secret = [0_u8; N4_ARGON_OUTPUT_LEN];
+        OsRng.fill_bytes(&mut secret);
+        Self {
+            trust_root_id,
+            secret,
+        }
+    }
+
+    #[must_use]
+    pub const fn trust_root_id(&self) -> TrustRootId {
+        self.trust_root_id
+    }
+
+    pub fn expose_for_delivery<R>(self, f: impl for<'a> FnOnce(&'a str) -> R) -> R {
+        const PREFIX: &str = "nstrust_";
+        let mut bytes = [0_u8; INVITATION_TOKEN_BYTES];
+        bytes[..16].copy_from_slice(self.trust_root_id.0.as_bytes());
+        bytes[16..].copy_from_slice(&self.secret);
+        let plaintext = Zeroizing::new(format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes)));
+        bytes.zeroize();
+        f(plaintext.as_str())
+    }
+
+    fn with_secret<R>(&self, f: impl FnOnce(&[u8; N4_ARGON_OUTPUT_LEN]) -> R) -> R {
+        f(&self.secret)
+    }
+}
+impl Drop for OwnerTrustRootToken {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
+}
+impl fmt::Debug for OwnerTrustRootToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OwnerTrustRootToken([REDACTED])")
+    }
+}
+impl fmt::Display for OwnerTrustRootToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+impl FromStr for OwnerTrustRootToken {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        const PREFIX: &str = "nstrust_";
+        let encoded = value
+            .strip_prefix(PREFIX)
+            .ok_or(DomainError::InvalidValue {
+                kind: "owner trust root token",
+                reason: "must use the exact nstrust_ prefix",
+            })?;
+        if encoded.len() != INVITATION_TOKEN_ENCODED_LEN
+            || value.len() != PREFIX.len() + INVITATION_TOKEN_ENCODED_LEN
+        {
+            return Err(DomainError::InvalidValue {
+                kind: "owner trust root token",
+                reason: "must be an exact 48-byte base64url token without padding",
+            });
+        }
+        let mut bytes = [0_u8; INVITATION_TOKEN_BYTES];
+        let decoded = match URL_SAFE_NO_PAD.decode_slice(encoded, &mut bytes) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                bytes.zeroize();
+                return Err(DomainError::InvalidValue {
+                    kind: "owner trust root token",
+                    reason: "must be canonical base64url without padding",
+                });
+            }
+        };
+        let canonical = Zeroizing::new(URL_SAFE_NO_PAD.encode(bytes));
+        if decoded != INVITATION_TOKEN_BYTES || canonical.as_str() != encoded {
+            bytes.zeroize();
+            return Err(DomainError::InvalidValue {
+                kind: "owner trust root token",
+                reason: "must be canonical base64url without padding",
+            });
+        }
+        let uuid = Uuid::from_bytes(bytes[..16].try_into().expect("fixed UUID byte width"));
+        let trust_root_id = TrustRootId::parse(&uuid.to_string())?;
+        let mut secret = [0_u8; N4_ARGON_OUTPUT_LEN];
+        secret.copy_from_slice(&bytes[16..]);
+        bytes.zeroize();
+        Ok(Self {
+            trust_root_id,
+            secret,
+        })
+    }
+}
+
+/// A persisted verifier only. It never contains a plaintext invitation or trust-root token.
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SecretVerifier(String);
@@ -940,16 +1113,23 @@ impl<'de> Deserialize<'de> for SecretVerifier {
 impl SecretVerifier {
     /// Builds an Argon2id PHC verifier using a fresh random salt for this record.
     pub fn from_token(token: &InvitationToken) -> Result<Self, DomainError> {
+        token.with_secret(Self::from_secret)
+    }
+
+    /// Builds a verifier for an N5 local-owner trust-root capability.
+    pub fn from_trust_root_token(token: &OwnerTrustRootToken) -> Result<Self, DomainError> {
+        token.with_secret(Self::from_secret)
+    }
+
+    fn from_secret(secret: &[u8; N4_ARGON_OUTPUT_LEN]) -> Result<Self, DomainError> {
         let params = n4_argon_params()?;
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        token.with_secret(|secret| {
-            let salt = SaltString::generate(&mut OsRng);
-            let phc = argon
-                .hash_password(secret, &salt)
-                .map_err(|_| invalid_verifier())?
-                .to_string();
-            Self::parse(phc)
-        })
+        let salt = SaltString::generate(&mut OsRng);
+        let phc = argon
+            .hash_password(secret, &salt)
+            .map_err(|_| invalid_verifier())?
+            .to_string();
+        Self::parse(phc)
     }
 
     /// Validates a stored N4 Argon2id PHC verifier before accepting persistence.
@@ -966,8 +1146,17 @@ impl SecretVerifier {
     /// Verifies a N4 token against this persisted PHC record without exposing its
     /// plaintext token representation.
     pub fn verify(&self, token: &InvitationToken) -> Result<bool, DomainError> {
+        token.with_secret(|secret| self.verify_secret(secret))
+    }
+
+    /// Verifies an N5 owner trust-root token without exposing its plaintext.
+    pub fn verify_trust_root(&self, token: &OwnerTrustRootToken) -> Result<bool, DomainError> {
+        token.with_secret(|secret| self.verify_secret(secret))
+    }
+
+    fn verify_secret(&self, secret: &[u8; N4_ARGON_OUTPUT_LEN]) -> Result<bool, DomainError> {
         let parsed = validate_n4_verifier(&self.0)?;
-        token.with_secret(|secret| Ok(Argon2::default().verify_password(secret, &parsed).is_ok()))
+        Ok(Argon2::default().verify_password(secret, &parsed).is_ok())
     }
 
     fn is_n4(&self) -> bool {
@@ -1180,6 +1369,18 @@ pub struct InvitationAdminIntent {
 }
 impl InvitationAdminIntent {
     /// Explicit construction is required whenever an invitation assigns `Role::Admin`.
+    #[must_use]
+    pub const fn explicit() -> Self {
+        Self { _explicit: () }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceTrustAuthorityAdminIntent {
+    _explicit: (),
+}
+impl DeviceTrustAuthorityAdminIntent {
+    /// Explicit owner-controlled intent is required to configure N5 trust authority.
     #[must_use]
     pub const fn explicit() -> Self {
         Self { _explicit: () }

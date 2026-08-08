@@ -6,14 +6,14 @@ use nodescale_domain::{
     ProviderInstanceId, ProviderJoinCredential, ProviderNodeId,
 };
 use nodescale_provider::{
-    CompatibilityReport, CompatibilityStatus, ConditionalIdentityEvidence, IssuedJoinCredential,
+    CompatibilityReport, CompatibilityStatus, ConditionalIdentityEvidence,
+    HeadscaleMutationAuthorization, HeadscaleMutationAuthorizationContext, IssuedJoinCredential,
     MutableIdentityEvidence, MutationAmbiguity, MutationEvidence, MutationOutcome,
     MutationPolicyMode, MutationProvider, MutationTags, PreAuthAssociationStrength,
     PreAuthCorrelationObservation, ProviderCapability, ProviderError, ProviderHealth,
     ProviderHealthStatus, ProviderIdentityEvidence, ProviderMutation, ProviderNode,
     ProviderUserObservation, ReadOnlyProvider, ServerInspection,
 };
-use nodescale_state::{MutationAuthorization, MutationAuthorizationContext};
 use reqwest::{Client, StatusCode, Url};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,15 @@ impl fmt::Debug for HeadscaleCustomRootCa {
             Self::PemBytes(_) => "HeadscaleCustomRootCa::PemBytes([REDACTED])",
             Self::PemFile(_) => "HeadscaleCustomRootCa::PemFile([REDACTED])",
         })
+    }
+}
+impl HeadscaleCustomRootCa {
+    /// Materialize the bounded PEM bytes once so callers can bind and then use
+    /// the same bytes without a file-path time-of-check/time-of-use gap.
+    pub fn into_pem_bytes_and_sha256(self) -> Result<(Vec<u8>, String), HeadscaleError> {
+        let bytes = read_custom_root_ca(self)?;
+        let fingerprint = format!("sha256:{:x}", Sha256::digest(&bytes));
+        Ok((bytes, fingerprint))
     }
 }
 
@@ -440,15 +449,12 @@ impl HeadscaleProvider {
             ))
     }
 
-    /// Singular node reads used to reconcile mutations intentionally do not
+    /// Singular authoritative node reads intentionally do not
     /// inherit the broad read-only "any 404 is absent" convenience behavior.
     /// Only Headscale's authenticated, resource-specific grpc-gateway envelope
     /// is evidence that a node is absent; a route miss, proxy response, or
     /// malformed body remains an error and cannot confirm deletion.
-    async fn get_node_bytes_for_mutation(
-        &self,
-        path: &str,
-    ) -> Result<Option<Vec<u8>>, ProviderError> {
+    async fn get_exact_node_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, ProviderError> {
         let url = self
             .endpoint
             .join(path.trim_start_matches('/'))
@@ -536,7 +542,7 @@ impl HeadscaleProvider {
         };
         let mut constraints = vec![
             "N1A adapter is strictly read-only".into(),
-            "pre-auth association is partial correlation evidence only".into(),
+            "pre-auth association is authenticated provider-registration evidence only; it is never Nodescale trust".into(),
         ];
         if version.dirty {
             constraints.push("Headscale build reports uncommitted source changes".into());
@@ -678,7 +684,7 @@ impl ReadOnlyProvider for HeadscaleProvider {
             ));
         }
         let path = format!("api/v1/node/{}", identity.node_id);
-        let Some(body) = self.get_bytes(&path, true).await? else {
+        let Some(body) = self.get_exact_node_bytes(&path).await? else {
             return Ok(None);
         };
         let json = std::str::from_utf8(&body)
@@ -769,11 +775,12 @@ impl fmt::Debug for HeadscalePolicySnapshot {
 /// Explicitly constructed v0.29.3 mutation capability. It is intentionally
 /// not implemented by `HeadscaleProvider`, preserving that type's read-only
 /// contract for existing import/reconciliation callers.
-pub struct HeadscaleMutationProvider {
+pub struct HeadscaleMutationProvider<A> {
     inner: HeadscaleProvider,
     transport: HeadscaleMutationTransport,
+    authorization: std::marker::PhantomData<fn(A)>,
 }
-impl std::fmt::Debug for HeadscaleMutationProvider {
+impl<A> std::fmt::Debug for HeadscaleMutationProvider<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HeadscaleMutationProvider")
             .field("endpoint", &self.inner.sanitized_endpoint())
@@ -782,7 +789,7 @@ impl std::fmt::Debug for HeadscaleMutationProvider {
             .finish()
     }
 }
-impl HeadscaleMutationProvider {
+impl<A> HeadscaleMutationProvider<A> {
     pub fn new(
         endpoint: &str,
         instance_id: ProviderInstanceId,
@@ -793,6 +800,7 @@ impl HeadscaleMutationProvider {
         Ok(Self {
             inner: HeadscaleProvider::new(endpoint, instance_id, api_key, options)?,
             transport,
+            authorization: std::marker::PhantomData,
         })
     }
 
@@ -813,6 +821,7 @@ impl HeadscaleMutationProvider {
                 custom_root_ca,
             )?,
             transport,
+            authorization: std::marker::PhantomData,
         })
     }
 
@@ -836,6 +845,7 @@ impl HeadscaleMutationProvider {
         Ok(Self {
             inner: HeadscaleProvider::new_for_test(endpoint, instance_id, api_key, options)?,
             transport,
+            authorization: std::marker::PhantomData,
         })
     }
 
@@ -926,7 +936,7 @@ impl HeadscaleMutationProvider {
         let path = format!("api/v1/node/{}", target.node_id.as_str());
         let Some(body) = self
             .inner
-            .get_node_bytes_for_mutation(&path)
+            .get_exact_node_bytes(&path)
             .await
             .map_err(outcome_from_error)?
         else {
@@ -963,8 +973,8 @@ impl HeadscaleMutationProvider {
 }
 
 #[async_trait::async_trait]
-impl MutationProvider for HeadscaleMutationProvider {
-    type Authorization = MutationAuthorization;
+impl<A: HeadscaleMutationAuthorization> MutationProvider for HeadscaleMutationProvider<A> {
+    type Authorization = A;
 
     fn instance_id(&self) -> ProviderInstanceId {
         self.inner.instance_id
@@ -986,18 +996,18 @@ impl MutationProvider for HeadscaleMutationProvider {
         // Consume state-owned authorization before any local transport or
         // network request. Runtime version/health evidence follows below.
         if authorization
-            .validate(MutationAuthorizationContext::headscale(
-                self.transport.network_id,
-                self.inner.instance_id,
-                self.transport.authorization_generation,
-                self.transport.configuration_generation,
-                &self.transport.configuration_fingerprint,
-                "v0.29.3",
-                false,
+            .validate_for_headscale(HeadscaleMutationAuthorizationContext {
+                network_id: self.transport.network_id,
+                provider_instance_id: self.inner.instance_id,
+                authorization_generation: self.transport.authorization_generation,
+                configuration_generation: self.transport.configuration_generation,
+                configuration_fingerprint: self.transport.configuration_fingerprint.clone(),
+                version: "v0.29.3".into(),
+                dirty: false,
                 capability,
-                self.transport.policy_mode,
+                policy_mode: self.transport.policy_mode,
                 now,
-            ))
+            })
             .is_err()
         {
             return MutationOutcome::Rejected;
@@ -1797,7 +1807,7 @@ fn normalize_node(
             canonical_positive_u64(&key.id, "invalid Headscale pre-auth key ID").map(
                 |credential_id| PreAuthCorrelationObservation {
                     credential_id,
-                    association: PreAuthAssociationStrength::Partial,
+                    association: PreAuthAssociationStrength::ProviderAuthenticatedRegistration,
                 },
             )
         })

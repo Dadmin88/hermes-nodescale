@@ -136,16 +136,18 @@ Tests and disposable integration tooling should cover:
 - revocation and expiry settlement;
 - exact provider dispatch counts;
 - isolated provider join using the exact issued credential;
+- exact N4/provider registration correlation into one initially untrusted logical device;
+- verifier-only owner-root authorization, explicit activation/revocation, replay and revision races;
+- provider-binding stale/cleanup-pending/removed lifecycle;
 - cleanup of disposable provider credentials, nodes, listeners, and runtime state.
 
-Provider-join acceptance proves provider credential association. It does not prove authenticated Keryx identity or trusted Hermes Fleet membership.
+Exact-tree N5 acceptance proves provider registration correlation plus the disposable Nodescale logical identity/trust lifecycle. It does not prove authenticated Keryx identity or trusted Hermes Fleet membership.
 
 ## Current integration boundary
 
-The repository does not yet complete:
+N5 implements Nodescale-generated logical identity, explicit owner-authorized Nodescale trust, provider-binding reconciliation, and cleanup state. The repository does not yet complete:
 
-- authenticated correlation from provider node to Keryx sender identity;
-- trusted Nodescale device activation;
+- authenticated correlation from a Nodescale device to Keryx sender identity;
 - managed Hermes Fleet enrollment and grant projection;
 - a general operator invitation API, CLI, or web console.
 

@@ -26,7 +26,7 @@ Conceptual request fields are `network_id`, `device_id`, `join_session_id`, `non
 
 ## Consequences
 
-Nodescale components that do not depend on verified Keryx provenance can operate independently. Trusted device activation remains blocked until the binding surface exists and passes spoofing, replay, expiry, conflict, rotation, zero-run, and zero-execution-binding tests.
+Nodescale components that do not depend on verified Keryx provenance can operate independently, including N5's owner-authorized logical trust-state transition. Live/application activation remains blocked until the Keryx binding surface exists and passes spoofing, replay, expiry, conflict, rotation, zero-run, and zero-execution-binding tests.
 
 ## Rejected Alternatives
 

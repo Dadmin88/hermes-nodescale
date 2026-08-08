@@ -54,13 +54,14 @@ Provider fields are classified by how safely they can participate in identity co
 | `machineKey` | Strong but replaceable correlation evidence | Fingerprinted and retained as a rotation/conflict guard; never matched globally. |
 | `nodeKey`, `discoKey` | Mutable cryptographic observation | Retained separately; never substituted for canonical provider identity. |
 | user metadata | Conditional provider metadata | Observation only. |
-| pre-auth credential ID relationship | Partial correlation evidence | Useful join evidence, but not device identity. |
+| generic pre-auth credential relationship | Partial correlation evidence | Never authorizes N5 identity confirmation. |
+| authenticated node record's exact credential ID (`ProviderAuthenticatedRegistration`) | Provider-authenticated registration evidence | With exact active/unexpired N4 provenance, exact re-read, and machine-key fingerprint verification, may create an initially untrusted logical device. |
 | hostname / given name | Mutable presentation metadata | Display only. |
 | IP addresses | Mutable addressing metadata | Never identity. |
 | tags | Mutable provider policy metadata | Never identity or application authorization. |
 | timestamps / online / expiry | Mutable operational observations | Diagnostics and correlation support only. |
 
-Pre-auth credential association alone is insufficient for trusted device identity.
+Generic pre-auth association alone is insufficient for identity or trust. The stronger authenticated registration classification remains provider evidence only: it cannot activate trust, establish Keryx identity, or grant Hermes Fleet authority.
 
 ## HTTP safety
 

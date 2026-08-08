@@ -8,7 +8,8 @@ use nodescale_domain::{
     Revocation, RevocationState,
 };
 use nodescale_provider::{
-    CompatibilityStatus, MutationPolicyMode, ProviderError, ProviderMutationCapability,
+    CompatibilityStatus, HeadscaleMutationAuthorization, HeadscaleMutationAuthorizationContext,
+    MutationPolicyMode, PreAuthAssociationStrength, ProviderError, ProviderMutationCapability,
     ProviderNode, ReadOnlyProvider, ServerInspection,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
@@ -22,13 +23,19 @@ use std::{
 };
 use thiserror::Error;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 4;
+mod n5;
+pub use n5::*;
+#[cfg(test)]
+mod n5_identity_trust_tests;
+
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 const MUTATION_AUTHORIZATION_MIGRATION: &str =
     include_str!("../migrations/0003_mutation_authorization.sql");
 const INVITATION_LIFECYCLE_MIGRATION: &str =
     include_str!("../migrations/0004_invitation_lifecycle.sql");
+const DEVICE_TRUST_MIGRATION: &str = include_str!("../migrations/0005_device_trust.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -75,6 +82,8 @@ pub struct HeadscaleImportConfig {
     pub provider_instance_id: ProviderInstanceId,
     pub opaque_secret_reference: String,
     pub compatibility_pin: String,
+    #[serde(default)]
+    pub custom_root_ca_sha256: Option<String>,
     pub tls_verification: TlsVerificationPolicy,
     pub read_only: bool,
     pub mutation_allowed: bool,
@@ -120,10 +129,30 @@ impl HeadscaleImportConfig {
             provider_instance_id,
             opaque_secret_reference,
             compatibility_pin,
+            custom_root_ca_sha256: None,
             tls_verification,
             read_only: true,
             mutation_allowed: false,
         })
+    }
+
+    pub fn with_custom_root_ca_sha256(
+        mut self,
+        fingerprint: impl Into<String>,
+    ) -> Result<Self, StateError> {
+        let fingerprint = fingerprint.into();
+        if fingerprint.len() != 71
+            || !fingerprint.starts_with("sha256:")
+            || !fingerprint[7..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        {
+            return Err(StateError::Conflict(
+                "custom root CA fingerprint must be canonical sha256".into(),
+            ));
+        }
+        self.custom_root_ca_sha256 = Some(fingerprint);
+        Ok(self)
     }
 }
 
@@ -636,6 +665,27 @@ impl MutationAuthorization {
     }
 }
 
+impl HeadscaleMutationAuthorization for MutationAuthorization {
+    fn validate_for_headscale(
+        self,
+        context: HeadscaleMutationAuthorizationContext,
+    ) -> Result<(), ProviderError> {
+        self.validate(MutationAuthorizationContext::headscale(
+            context.network_id,
+            context.provider_instance_id,
+            context.authorization_generation,
+            context.configuration_generation,
+            &context.configuration_fingerprint,
+            &context.version,
+            context.dirty,
+            context.capability,
+            context.policy_mode,
+            context.now,
+        ))
+        .map_err(|error| ProviderError::Rejected(error.to_string()))
+    }
+}
+
 pub struct StateStore {
     connection: RefCell<Connection>,
     fail_before_audit: Cell<bool>,
@@ -671,6 +721,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(DISCOVERY_MIGRATION))
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -687,6 +738,7 @@ impl StateStore {
                 .execute_batch(DISCOVERY_MIGRATION)
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -702,6 +754,7 @@ impl StateStore {
             let migration_result = connection
                 .execute_batch(MUTATION_AUTHORIZATION_MIGRATION)
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -716,9 +769,25 @@ impl StateStore {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
             let migration_result = connection
                 .execute_batch(INVITATION_LIFECYCLE_MIGRATION)
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 4 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result =
+                connection
+                    .execute_batch(DEVICE_TRUST_MIGRATION)
+                    .and_then(|()| {
+                        connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                    });
             match migration_result {
                 Ok(()) => connection.execute_batch("COMMIT;")?,
                 Err(error) => {
@@ -1737,7 +1806,7 @@ impl StateStore {
             let record = serde_json::to_string(network)?;
             tx.execute("INSERT INTO networks (network_id,name,state,provider_kind,provider_instance_id,membership_generation,policy_generation,record_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![network.network_id.to_string(), network.name, lower(network.state.as_str()), "headscale", network.provider_instance_id.to_string(), to_i64(network.membership_generation)?, to_i64(network.policy_generation)?, record, network.created_at.to_rfc3339(), network.updated_at.to_rfc3339()]).map_err(map_constraint)?;
             tx.execute("INSERT INTO membership_generations (network_id,generation,updated_at) VALUES (?1,?2,?3)", params![network.network_id.to_string(), to_i64(network.membership_generation)?, network.updated_at.to_rfc3339()]).map_err(map_constraint)?;
-            tx.execute("INSERT INTO provider_imports (network_id,provider_instance_id,server_url,opaque_secret_reference,compatibility_pin,tls_verification,read_only,mutation_allowed,compatibility,provider_version,last_success_at,last_attempt_at) VALUES (?1,?2,?3,?4,?5,'verify',1,0,?6,?7,?8,?8)", params![network.network_id.to_string(), config.provider_instance_id.to_string(), config.server_url, config.opaque_secret_reference, config.compatibility_pin, compatibility_name(inspection.compatibility), inspection.provider_version, snapshot_at.to_rfc3339()]).map_err(map_constraint)?;
+            tx.execute("INSERT INTO provider_imports (network_id,provider_instance_id,server_url,opaque_secret_reference,compatibility_pin,custom_root_ca_sha256,tls_verification,read_only,mutation_allowed,compatibility,provider_version,last_success_at,last_attempt_at) VALUES (?1,?2,?3,?4,?5,?6,'verify',1,0,?7,?8,?9,?9)", params![network.network_id.to_string(), config.provider_instance_id.to_string(), config.server_url, config.opaque_secret_reference, config.compatibility_pin, config.custom_root_ca_sha256, compatibility_name(inspection.compatibility), inspection.provider_version, snapshot_at.to_rfc3339()]).map_err(map_constraint)?;
             store.append_audit(tx, Some(network.network_id), None, actor.clone(), "network_imported", "success", Some(network.membership_generation), &SanitizedMetadata::empty())?;
             store.append_audit(tx, Some(network.network_id), None, actor.clone(), "provider_reconciliation_started", "success", None, &SanitizedMetadata::empty())?;
             for node in &nodes {
@@ -1986,16 +2055,19 @@ impl StateStore {
         &self,
         network_id: NetworkId,
     ) -> Result<(ProviderInstanceId, HeadscaleImportConfig), StateError> {
-        let row = self.connection.borrow().query_row("SELECT provider_instance_id,server_url,opaque_secret_reference,compatibility_pin FROM provider_imports WHERE network_id=?1", [network_id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))).optional()?.ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
+        let row = self.connection.borrow().query_row("SELECT provider_instance_id,server_url,opaque_secret_reference,compatibility_pin,custom_root_ca_sha256 FROM provider_imports WHERE network_id=?1", [network_id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?))).optional()?.ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
         let instance = ProviderInstanceId::parse(&row.0)
             .map_err(|error| StateError::Conflict(error.to_string()))?;
-        let config = HeadscaleImportConfig::new(
+        let mut config = HeadscaleImportConfig::new(
             row.1,
             instance,
             row.2,
             row.3,
             TlsVerificationPolicy::Verify,
         )?;
+        if let Some(fingerprint) = row.4 {
+            config = config.with_custom_root_ca_sha256(fingerprint)?;
+        }
         Ok((instance, config))
     }
 

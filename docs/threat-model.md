@@ -101,14 +101,19 @@ Exact provider cleanup remains retryable and is tracked separately from applicat
 
 Disposable acceptance tooling must avoid production providers and real devices, and it must restore runtime, listener, repository, and host-network invariants after completion.
 
+## N5 identity and trust controls
+
+N5's state-owned confirmation path rejects caller-assembled raw identity persistence. It requires exact active/unexpired N4 provenance, one provider-authenticated registration association, exact provider re-read, and matching machine-key fingerprint. Zero/multiple matches, cross-session swaps, duplicate machine keys, expiry, and drift fail closed. The generated logical `DeviceId`, provider binding, and trust state remain separate.
+
+A one-time local bootstrap returns an opaque `nstrust_` 256-bit capability; only a fixed-profile Argon2id verifier persists. The active root gates sealed authority capabilities and one-shot revision-fenced actions. Root or authority revocation invalidates future issuance; root revocation also disables linked authorities and unconsumed actions. Decisions and N5 audit events are immutable. Effective trust is false without an active exact binding, and provider reconciliation returns no trusted result on transient read failure.
+
 ## Trust not yet established by this repository
 
-The current implementation does not claim that provider admission establishes:
+N5 Nodescale trust is implemented, but the repository does not claim that provider admission or N5 trust establishes:
 
 - authenticated Keryx sender identity;
 - a verified Keryx binding;
-- trusted Nodescale device activation;
 - managed Hermes Fleet enrollment or grants;
 - Hermes Fleet scheduling or execution permission.
 
-Those trust transitions require their own authenticated evidence and integration contracts.
+Those remaining trust transitions require their own authenticated evidence and integration contracts.

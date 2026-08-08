@@ -300,8 +300,8 @@ procedures, authorization keys, or other information required to install
 and execute modified versions of a covered work in that User Product from
 a modified version of its Corresponding Source.  The information must
 suffice to ensure that the continued functioning of the modified object
-code is in no case prevented or interfered with solely because modification
-has been made.
+code is in no case prevented or interfered with solely because
+modification has been made.
 
   If you convey an object code work under this section in, or with, or
 specifically for use in, a User Product, and the conveying occurs as
@@ -358,11 +358,11 @@ that material) supplement the terms of this License with terms:
     Notices displayed by works containing it; or
 
     c) Prohibiting misrepresentation of the origin of that material, or
-    requiring that modified versions of that material be marked in
+    requiring that modified versions of such material be marked in
     reasonable ways as different from the original version; or
 
     d) Limiting the use for publicity purposes of names of licensors or
-authors of the material; or
+    authors of the material; or
 
     e) Declining to grant rights under trademark law for use of some
     trade names, trademarks, or service marks; or
@@ -509,17 +509,17 @@ work and works based on it.
   A patent license is "discriminatory" if it does not include within
 the scope of its coverage, prohibits the exercise of, or is
 conditioned on the non-exercise of one or more of the rights that are
-specifically granted in this License.  You may not convey a covered
+specifically granted under this License.  You may not convey a covered
 work if you are a party to an arrangement with a third party that is
 in the business of distributing software, under which you make payment
 to the third party based on the extent of your activity of conveying
-the work, and under which the third party grants, to any of the parties
-who would receive the covered work, a discriminatory patent license
-(a) in connection with copies of the covered work conveyed by you (or
-copies made from those copies), or (b) primarily for and in connection
-with specific products or compilations that contain the covered work,
-unless you entered into that arrangement, or that patent license was
-granted, prior to 28 March 2007.
+the work, and under which the third party grants, to any of the
+parties who would receive the covered work from you, a discriminatory
+patent license (a) in connection with copies of the covered work
+conveyed by you (or copies made from those copies), or (b) primarily
+for and in connection with specific products or compilations that
+contain the covered work, unless you entered into that arrangement,
+or that patent license was granted, prior to 28 March 2007.
 
   Nothing in this License shall be construed as excluding or limiting
 any implied license or other defenses to infringement that may
@@ -566,18 +566,18 @@ will be similar in spirit to the present version, but may differ in detail to
 address new problems or concerns.
 
   Each version is given a distinguishing version number.  If the
-Program specifies that a certain numbered version of the GNU Affero
-General Public License "or any later version" applies to it, you have
-the option of following the terms and conditions either of that
-numbered version or of any later version published by the Free
-Software Foundation.  If the Program does not specify a version number
-of the GNU Affero General Public License, you may choose any version
-ever published by the Free Software Foundation.
+Program specifies that a certain numbered version of the GNU Affero General
+Public License "or any later version" applies to it, you have the
+option of following the terms and conditions either of that numbered
+version or of any later version published by the Free Software
+Foundation.  If the Program does not specify a version number of the
+GNU Affero General Public License, you may choose any version ever published
+by the Free Software Foundation.
 
   If the Program specifies that a proxy can decide which future
-versions of the GNU Affero General Public License can be used, that
-proxy's public statement of acceptance of a version permanently
-authorizes you to choose that version for the Program.
+versions of the GNU Affero General Public License can be used, that proxy's
+public statement of acceptance of a version permanently authorizes you
+to choose that version for the Program.
 
   Later license versions may give you additional or different
 permissions.  However, no additional obligations are imposed on any
@@ -633,8 +633,8 @@ the "copyright" line and a pointer to where the full notice is found.
     Copyright (C) <year>  <name of author>
 
     This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
+    it under the terms of the GNU Affero General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
     This program is distributed in the hope that it will be useful,

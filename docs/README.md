@@ -14,9 +14,10 @@ This directory contains the durable technical documentation for Nodescale. Imple
 - [Headscale compatibility](headscale-compatibility.md) — supported Headscale version behavior and HTTP safety requirements.
 - [Discovery and reconciliation](discovery-reconciliation.md) — read-only import, provider observations, classifications, and reconciliation semantics.
 
-## Device admission
+## Device admission and trust
 
 - [Invitations and redemption](invitations.md) — invitation tokens, join sessions, provider credential coupling, and the redemption transport.
+- [Device identity and trust](device-trust.md) — authoritative N5 correlation, owner-root authorization, trust decisions, binding reconciliation, and cleanup.
 
 ## Contributor reference
 

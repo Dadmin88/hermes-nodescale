@@ -1,28 +1,21 @@
 [package]
-name = "nodescale-state"
+name = "nodescale-device-trust"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
 nodescale-domain = { path = "../nodescale-domain" }
 nodescale-provider = { path = "../nodescale-provider" }
 nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }
-rusqlite.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
+nodescale-state = { path = "../nodescale-state" }
 thiserror.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+nodescale-invitation = { path = "../nodescale-invitation" }
+nodescale-redemption-ingress = { path = "../nodescale-redemption-ingress" }
 tempfile = "3"
-nodescale-provider-fake = { path = "../nodescale-provider-fake" }
 tokio.workspace = true
-
-[lints]
-workspace = true
+zeroize.workspace = true

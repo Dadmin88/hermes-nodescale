@@ -44,7 +44,7 @@ fn selected_version_nodes_normalize_strong_identity_and_metadata() {
     assert_eq!(node.user.as_ref().unwrap().id, "7");
     assert_eq!(
         node.pre_auth.as_ref().unwrap().association,
-        PreAuthAssociationStrength::Partial
+        PreAuthAssociationStrength::ProviderAuthenticatedRegistration
     );
     assert_eq!(node.pre_auth.as_ref().unwrap().credential_id, "9");
 }
@@ -298,6 +298,29 @@ async fn exact_lookup_checks_canonical_id_and_machine_key_fingerprint() {
         .await
         .unwrap_err();
     assert!(matches!(error, ProviderError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn exact_lookup_rejects_non_authoritative_not_found_response() {
+    let identity = parse_node_fixture(
+        include_str!("../fixtures/v0.29.3-node.json"),
+        instance(),
+        fixed_now(),
+    )
+    .unwrap()
+    .identity;
+    let (endpoint, _) = start_server(vec![(
+        404,
+        r#"{"code":5,"message":"Not Found","details":[]}"#,
+    )])
+    .await;
+
+    let error = test_provider(&endpoint, HeadscaleClientOptions::default())
+        .get_node(&identity)
+        .await
+        .expect_err("only Headscale's exact node-absence envelope is authoritative");
+
+    assert!(matches!(error, ProviderError::MalformedResponse(_)));
 }
 
 #[tokio::test]

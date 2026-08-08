@@ -19,7 +19,7 @@ Persist a typed binding between the three identities with independent credential
 
 ## Consequences
 
-Activation requires all three identities and an explicit verified binding. Conflicts fail closed. Revocation and rotation can advance one generation without rewriting identity history.
+N5 may record an owner-authorized Nodescale **logical trust state** after exact provider correlation; that state is not application/runtime activation. Live managed-device activation requires all three identities and an explicit verified binding. Conflicts fail closed. Revocation and rotation can advance one generation without rewriting identity history.
 
 ## Rejected Alternatives
 

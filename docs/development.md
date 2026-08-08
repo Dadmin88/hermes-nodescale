@@ -50,10 +50,13 @@ The harness is expected to:
 - avoid host networking, TUN access, and unnecessary Linux capabilities;
 - keep provider authority in owner-readable temporary files;
 - validate single-use redemption and exact provider credential association;
+- confirm one opaque logical `DeviceId` only from exact active N4 provenance, `ProviderAuthenticatedRegistration`, exact provider re-read, and matching machine-key fingerprint;
+- prove pre-trust false, owner-root-gated activation true, explicit revocation false, provider cleanup/stale binding, and zero final trusted devices;
+- prove zero Keryx bindings, Fleet enrollment/grants, and Hermes activation;
 - revoke the credential and delete the disposable provider node during cleanup;
 - fail if repository, listener, runtime-root, or host-network invariants are not restored.
 
-Acceptance evidence is useful for integration assurance, but it does not by itself establish trusted Nodescale, Keryx, or Hermes Fleet identity.
+Exact-tree N5 acceptance evidence establishes the disposable Nodescale identity/trust lifecycle only. It does not establish authenticated Keryx identity or Hermes Fleet authority.
 
 ## Dependency rationale
 

@@ -903,6 +903,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodescale-device-trust"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "nodescale-domain",
+ "nodescale-invitation",
+ "nodescale-provider",
+ "nodescale-provider-headscale",
+ "nodescale-redemption-ingress",
+ "nodescale-state",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "nodescale-domain"
 version = "0.1.0"
 dependencies = [
@@ -1011,6 +1029,7 @@ dependencies = [
  "nodescale-domain",
  "nodescale-provider",
  "nodescale-provider-fake",
+ "nodescale-provider-headscale",
  "rusqlite",
  "serde",
  "serde_json",

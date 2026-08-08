@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use nodescale_device_trust::DeviceIdentityService;
 use nodescale_domain::{
-    AuditActor, Generation, JoinConstraints, Network, NetworkId, ProviderApiKey,
-    ProviderCredentialId, ProviderInstanceId, ProviderKind, Role, Roles,
+    AuditActor, DeviceTrustAuthorityAdminIntent, DeviceTrustCapability, Generation,
+    JoinConstraints, JoinSessionId, Network, NetworkId, ProviderApiKey, ProviderCredentialId,
+    ProviderInstanceId, ProviderKind, Role, Roles, TrustAuthorityId,
 };
 use nodescale_invitation::{CreateInvitationRequest, InvitationService};
 use nodescale_provider::{
@@ -19,8 +21,8 @@ use nodescale_redemption_ingress::{
     spawn_state_authorized_redemption_worker,
 };
 use nodescale_state::{
-    HeadscaleImportConfig, MutationAuthorization, ProviderMutationConfiguration, StateStore,
-    TlsVerificationPolicy,
+    HeadscaleImportConfig, MutationAuthorization, N5TrustAuthorityConfiguration, N5TrustReason,
+    ProviderMutationConfiguration, StateStore, TlsVerificationPolicy,
 };
 use std::{
     env,
@@ -38,7 +40,7 @@ use zeroize::Zeroizing;
 const FINGERPRINT: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn required_env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("ignored N4B proof requires {name}"))
+    std::env::var(name).unwrap_or_else(|_| panic!("ignored N5 proof requires {name}"))
 }
 
 fn required_path(name: &str) -> PathBuf {
@@ -97,8 +99,15 @@ fn assert_secret_absent_from_state_files(path: &Path, secret: &str) {
 
 struct ObservingBackend {
     inner: Arc<nodescale_redemption_ingress::RedemptionWorkerClient>,
-    observer:
-        Mutex<Option<oneshot::Sender<(nodescale_domain::InvitationId, ProviderCredentialId)>>>,
+    observer: Mutex<
+        Option<
+            oneshot::Sender<(
+                nodescale_domain::InvitationId,
+                JoinSessionId,
+                ProviderCredentialId,
+            )>,
+        >,
+    >,
 }
 
 #[async_trait]
@@ -110,7 +119,11 @@ impl RedemptionBackend for ObservingBackend {
         let delivery = self.inner.redeem(attempt).await?;
         let receipt = delivery.receipt();
         if let Some(observer) = self.observer.lock().unwrap().take() {
-            let _ = observer.send((receipt.invitation_id, receipt.credential_id));
+            let _ = observer.send((
+                receipt.invitation_id,
+                receipt.join_session_id,
+                receipt.credential_id,
+            ));
         }
         Ok(delivery)
     }
@@ -142,28 +155,28 @@ fn mutation_provider(
 
 #[tokio::test]
 #[ignore = "requires the retained disposable Headscale/Tailscale proof runner"]
-async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
-    let proof_root = required_path("NODESCALE_N4B_PROOF_ROOT");
+async fn disposable_join_confirms_identity_activates_revokes_and_cleans_up() {
+    let proof_root = required_path("NODESCALE_N5_PROOF_ROOT");
     let canonical_root = proof_root.canonicalize().unwrap();
     let container_proof_root = canonical_root == Path::new("/proof")
-        && env::var("NODESCALE_N4B_ALLOW_PUBLIC_BIND").as_deref() == Ok("proof-only");
+        && env::var("NODESCALE_N5_ALLOW_PUBLIC_BIND").as_deref() == Ok("proof-only");
     assert!(canonical_root.starts_with(std::env::temp_dir()) || container_proof_root);
-    let state_path = required_path("NODESCALE_N4B_PROOF_STATE_DB");
+    let state_path = required_path("NODESCALE_N5_PROOF_STATE_DB");
     assert!(state_path.starts_with(&canonical_root));
-    let endpoint = required_env("NODESCALE_N4B_HEADSCALE_URL");
-    let login_server = required_env("NODESCALE_N4B_LOGIN_SERVER");
-    let bind = required_env("NODESCALE_N4B_INGRESS_BIND")
+    let endpoint = required_env("NODESCALE_N5_HEADSCALE_URL");
+    let login_server = required_env("NODESCALE_N5_LOGIN_SERVER");
+    let bind = required_env("NODESCALE_N5_INGRESS_BIND")
         .parse::<SocketAddr>()
         .unwrap();
     assert!(
         bind.ip().is_ipv4()
             && (!bind.ip().is_unspecified()
-                || env::var("NODESCALE_N4B_ALLOW_PUBLIC_BIND").as_deref() == Ok("proof-only"))
+                || env::var("NODESCALE_N5_ALLOW_PUBLIC_BIND").as_deref() == Ok("proof-only"))
     );
-    let root_ca = fs::read(required_path("NODESCALE_N4B_CA_FILE")).unwrap();
+    let root_ca = fs::read(required_path("NODESCALE_N5_CA_FILE")).unwrap();
     let root_ca_pem = String::from_utf8(root_ca.clone()).unwrap();
     let api_key = Zeroizing::new(
-        fs::read_to_string(required_path("NODESCALE_N4B_HEADSCALE_API_KEY_FILE"))
+        fs::read_to_string(required_path("NODESCALE_N5_HEADSCALE_API_KEY_FILE"))
             .unwrap()
             .trim()
             .to_owned(),
@@ -172,7 +185,7 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
     let instance = ProviderInstanceId::new();
     let network = Network::new(
         NetworkId::new(),
-        "n4b-disposable-join-proof",
+        "n5-disposable-device-trust-proof",
         ProviderKind::Headscale,
         instance,
         Utc::now(),
@@ -196,6 +209,13 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
                 "secret://proof/runtime/headscale-api-key",
                 "v0.29.3",
                 TlsVerificationPolicy::Verify,
+            )
+            .unwrap()
+            .with_custom_root_ca_sha256(
+                HeadscaleCustomRootCa::PemBytes(root_ca.clone())
+                    .into_pem_bytes_and_sha256()
+                    .unwrap()
+                    .1,
             )
             .unwrap(),
             &read_provider,
@@ -318,15 +338,15 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
     )
     .unwrap();
     let bind_constructor =
-        if env::var("NODESCALE_N4B_ALLOW_PUBLIC_BIND").as_deref() == Ok("proof-only") {
+        if env::var("NODESCALE_N5_ALLOW_PUBLIC_BIND").as_deref() == Ok("proof-only") {
             TlsServeConfig::explicitly_public_bind
         } else {
             TlsServeConfig::private_bind
         };
     let tls = bind_constructor(
         bind,
-        required_path("NODESCALE_N4B_INGRESS_CERT_FILE"),
-        required_path("NODESCALE_N4B_INGRESS_KEY_FILE"),
+        required_path("NODESCALE_N5_INGRESS_CERT_FILE"),
+        required_path("NODESCALE_N5_INGRESS_KEY_FILE"),
     )
     .unwrap();
     let server = tokio::spawn(serve_tls(tls, router));
@@ -335,7 +355,7 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
     let token_path = canonical_root.join("invitation-token");
     write_new(&token_path, invitation_token.as_bytes(), 0o600);
     write_new(&canonical_root.join("ingress-ready"), b"ready\n", 0o600);
-    let (observed_invitation, credential_id) =
+    let (observed_invitation, observed_join_session, credential_id) =
         tokio::time::timeout(std::time::Duration::from_secs(60), observed)
             .await
             .expect("redemption observation timed out")
@@ -372,6 +392,129 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
             .map(|value| value.credential_id.as_str()),
         Some(reference.provider_reference.as_str())
     );
+
+    let identity_store = StateStore::open(&state_path).unwrap();
+    let configured_provider = identity_store
+        .configured_n5_headscale_provider_with_custom_root_ca(
+            network.network_id,
+            ProviderApiKey::new(api_key.as_str().to_owned()).unwrap(),
+            HeadscaleClientOptions::default(),
+            HeadscaleCustomRootCa::PemBytes(root_ca.clone()),
+        )
+        .unwrap();
+    let trust_service = DeviceIdentityService::new(&identity_store, &configured_provider);
+    assert_eq!(identity_store.device_count(network.network_id).unwrap(), 0);
+    let confirmation = trust_service
+        .confirm_join_identity(observed_join_session, Utc::now(), AuditActor::system())
+        .await
+        .unwrap();
+    assert_eq!(
+        confirmation.identity.provider_identity.node_id,
+        joined.identity.node_id
+    );
+    assert_eq!(
+        confirmation.identity.provider_reference,
+        reference.provider_reference
+    );
+    let device_id = confirmation.identity.device_id;
+    let binding_revision = confirmation.identity.binding_revision;
+    let before = trust_service
+        .trust_view_for_provider_registration(
+            joined.identity.node_id.clone(),
+            Utc::now(),
+            AuditActor::system(),
+        )
+        .await
+        .unwrap()
+        .expect("provider registration must resolve to the confirmed logical device");
+    assert_eq!(before.device_id, device_id);
+    assert_eq!(before.trust_state.as_str(), "Untrusted");
+    assert!(!before.currently_trusted);
+    write_new(
+        &canonical_root.join("identity-confirmed-untrusted"),
+        b"confirmed-untrusted\n",
+        0o600,
+    );
+
+    let authority_id = TrustAuthorityId::new();
+    let trust_now = Utc::now();
+    let root_token = trust_service
+        .bootstrap_owner_trust_root(
+            network.network_id,
+            "local-owner",
+            "n5-disposable-owner",
+            DeviceTrustAuthorityAdminIntent::explicit(),
+            trust_now,
+            AuditActor::system(),
+        )
+        .unwrap();
+    trust_service
+        .configure_trust_authority(
+            &root_token,
+            &N5TrustAuthorityConfiguration::new(
+                authority_id,
+                network.network_id,
+                "owner",
+                "n5-disposable-owner",
+                Generation::initial(),
+                trust_now - Duration::minutes(1),
+                trust_now + Duration::minutes(10),
+                [
+                    DeviceTrustCapability::ActivateDeviceTrust,
+                    DeviceTrustCapability::RevokeDeviceTrust,
+                ],
+                trust_now,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let activation = trust_service
+        .issue_trust_authorization(
+            &root_token,
+            authority_id,
+            device_id,
+            before.trust_revision,
+            DeviceTrustCapability::ActivateDeviceTrust,
+            trust_now,
+        )
+        .unwrap();
+    let trusted = trust_service
+        .activate_trust(activation, trust_now, N5TrustReason::OwnerApproved)
+        .unwrap();
+    assert!(!trusted.view.currently_trusted);
+    let fresh_trusted = trust_service
+        .trust_view(device_id, Utc::now(), AuditActor::system())
+        .await
+        .unwrap();
+    assert!(fresh_trusted.currently_trusted);
+    write_new(&canonical_root.join("trust-activated"), b"trusted\n", 0o600);
+
+    let revocation_now = trust_now + Duration::milliseconds(1);
+    let revocation = trust_service
+        .issue_trust_authorization(
+            &root_token,
+            authority_id,
+            device_id,
+            trusted.view.trust_revision,
+            DeviceTrustCapability::RevokeDeviceTrust,
+            revocation_now,
+        )
+        .unwrap();
+    let revoked = trust_service
+        .revoke_trust(revocation, revocation_now, N5TrustReason::OwnerRevoked)
+        .unwrap();
+    assert_eq!(revoked.view.trust_state.as_str(), "Revoked");
+    assert!(!revoked.view.currently_trusted);
+    let fresh_revoked = trust_service
+        .trust_view(device_id, Utc::now(), AuditActor::system())
+        .await
+        .unwrap();
+    assert!(!fresh_revoked.currently_trusted);
+    assert_secret_absent_from_state_files(
+        &state_path,
+        joined.identity_evidence.machine_key.as_str(),
+    );
+    write_new(&canonical_root.join("trust-revoked"), b"revoked\n", 0o600);
     write_new(&canonical_root.join("node-observed"), b"observed\n", 0o600);
     wait_for_file(
         &canonical_root.join("client-stopped"),
@@ -380,8 +523,13 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
     .await;
 
     let cleanup_store = StateStore::open(&state_path).unwrap();
-    let cleanup_provider =
-        mutation_provider(&endpoint, instance, network.network_id, &api_key, root_ca);
+    let cleanup_provider = mutation_provider(
+        &endpoint,
+        instance,
+        network.network_id,
+        &api_key,
+        root_ca.clone(),
+    );
     let cleanup_service = InvitationService::new(&cleanup_store, &cleanup_provider, &cleanup_store);
     cleanup_service
         .revoke(invitation_id, Utc::now(), AuditActor::system())
@@ -411,7 +559,26 @@ async fn disposable_client_redeems_over_tls_joins_and_is_exactly_removed() {
         }
     ));
     assert!(read_provider.list_nodes().await.unwrap().is_empty());
-    assert_eq!(cleanup_store.device_count(network.network_id).unwrap(), 0);
+    let cleanup_configured_provider = cleanup_store
+        .configured_n5_headscale_provider_with_custom_root_ca(
+            network.network_id,
+            ProviderApiKey::new(api_key.as_str().to_owned()).unwrap(),
+            HeadscaleClientOptions::default(),
+            HeadscaleCustomRootCa::PemBytes(root_ca),
+        )
+        .unwrap();
+    let cleanup_trust = DeviceIdentityService::new(&cleanup_store, &cleanup_configured_provider);
+    let final_view = cleanup_trust
+        .mark_active_binding_stale(
+            device_id,
+            binding_revision,
+            Utc::now(),
+            AuditActor::system(),
+        )
+        .unwrap();
+    assert_eq!(final_view.trust_state.as_str(), "Revoked");
+    assert!(!final_view.currently_trusted);
+    assert_eq!(cleanup_store.device_count(network.network_id).unwrap(), 1);
     assert_eq!(
         cleanup_store
             .keryx_binding_count(network.network_id)

@@ -126,11 +126,19 @@ revocation requested
 
 Provider outages may delay mesh cleanup, but they must not preserve application authorization. Historical identity and audit evidence remain available for reconciliation and incident analysis.
 
-## Trusted activation
+## N5 authoritative device identity and Nodescale trust
 
-Provider admission, invitation possession, and pre-auth credential association are insufficient for trusted activation. A trusted device requires authenticated Nodescale device evidence, authoritative provider correlation, verified Keryx provenance, and successful Hermes Fleet projection according to the relevant generations and policies.
+Provider admission, invitation possession, and generic partial pre-auth association are insufficient for identity or trust. N5's state-owned confirmation operation requires one exact active and unexpired N4 provider reference, one `ProviderAuthenticatedRegistration` observation, an exact provider-node re-read, and matching machine-key fingerprint. It then generates an opaque immutable `DeviceId` and creates a separate active provider binding; the device starts untrusted.
 
-The current repository implements the provider admission and membership foundations but does not yet complete the Keryx binding or Hermes Fleet projection path.
+A one-time local-owner bootstrap returns an opaque `nstrust_` 256-bit capability and persists only its fixed-profile Argon2id verifier. That active root gates sealed trust-authority configuration, one-shot revision-fenced action issuance, authority/root revocation, and append-only decisions. Root revocation disables linked authorities and invalidates unconsumed actions. Effective trust requires both logical trusted state and an active exact binding. Provider-backed reconciliation marks authoritative absence, expiry, credential drift, or machine-key drift stale; transient errors return no trusted result. Cleanup proceeds through revisioned `stale`, `cleanup_pending`, and `removed` states.
+
+N5 still creates no authenticated Keryx identity, Fleet enrollment/grant, Hermes activation, scheduler, workload placement, or runtime profile. See [Device Identity and Trust](device-trust.md).
+
+## Trusted activation beyond N5
+
+Provider admission alone cannot establish Keryx or Hermes Fleet authority. Those later transitions require authenticated Keryx provenance and successful Hermes Fleet projection according to their own generations and policies.
+
+The current repository implements N5 Nodescale identity/trust but does not complete Keryx binding or Hermes Fleet projection.
 
 ## Deliberate non-goals
 

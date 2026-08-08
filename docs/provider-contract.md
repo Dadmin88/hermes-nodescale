@@ -119,4 +119,4 @@ A normalized provider node cannot by itself:
 - authorize scheduling or execution;
 - promote provider tags or roles into application authorization.
 
-Pre-auth credential association is useful correlation evidence but remains insufficient as complete managed-device identity.
+Pre-auth evidence is classified. Generic `Partial` association is non-authorizing. Headscale's authenticated node record may emit `ProviderAuthenticatedRegistration` for its exact credential-ID linkage; N5 may consume that only with exact active/unexpired N4 provenance, an exact provider re-read, and matching machine-key fingerprint to create an initially untrusted logical device. It never activates trust or establishes Keryx/Fleet authority.

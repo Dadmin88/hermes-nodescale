@@ -2,6 +2,7 @@
 members = [
   "crates/nodescale-domain",
   "crates/nodescale-state",
+  "crates/nodescale-device-trust",
   "crates/nodescale-provider",
   "crates/nodescale-provider-fake",
   "crates/nodescale-provider-headscale",

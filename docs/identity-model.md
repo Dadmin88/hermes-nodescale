@@ -30,11 +30,13 @@ Other Headscale fields remain observations:
 
 None of those fields can substitute for the scoped provider identity.
 
-## Nodescale device identity
+## Nodescale device identity and N5 trust
 
-A provider join does not create trusted Nodescale identity by itself. Nodescale device identity requires durable Nodescale-owned state and credential evidence associated with the intended join workflow.
+A provider join does not create trusted Nodescale identity by itself. N5 creates a logical device only through the state-owned confirmation operation: exact active/unexpired N4 provenance, one `ProviderAuthenticatedRegistration`, exact provider re-read, and matching machine-key fingerprint. Nodescale generates the opaque immutable UUID `DeviceId`; provider IDs, hostnames, addresses, labels, and machine keys never become that logical ID.
 
-Credential and membership generations are independent. Rotation advances the appropriate generation without rewriting historical identity.
+Logical identity, provider binding, and trust are separate durable records. Confirmation creates an active binding and starts the device untrusted. An opaque verifier-backed local-owner root gates sealed trust authorities and revision-fenced one-shot activation/revocation decisions. Effective trust also requires an active exact binding; provider drift or cleanup makes current trust false without rewriting historical decisions. Root revocation disables linked authorities and unconsumed actions. See [Device Identity and Trust](device-trust.md).
+
+Credential, trust, provider-binding, and membership generations are independent. Rotation or cleanup advances the relevant revision without rewriting historical identity.
 
 ## Keryx binding
 

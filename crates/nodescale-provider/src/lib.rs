@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use nodescale_domain::{
-    ProviderCredentialId, ProviderCredentialReference, ProviderIdentity, ProviderInstanceId,
-    ProviderJoinCredential,
+    Generation, NetworkId, ProviderCredentialId, ProviderCredentialReference, ProviderIdentity,
+    ProviderInstanceId, ProviderJoinCredential,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,7 +186,11 @@ pub struct ProviderUserObservation {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreAuthAssociationStrength {
+    /// A correlation hint only; never sufficient for N5 identity confirmation.
     Partial,
+    /// The authenticated provider registration record itself names the exact
+    /// provider-native credential used for that registration.
+    ProviderAuthenticatedRegistration,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -282,6 +286,30 @@ pub trait ReadOnlyProvider: Send + Sync {
         identity: &ProviderIdentity,
     ) -> Result<Option<ProviderNode>, ProviderError>;
     async fn provider_health(&self) -> Result<ProviderHealth, ProviderError>;
+}
+
+/// Concrete runtime facts that a state-owned mutation authorization must match
+/// before the Headscale adapter performs any transport operation.
+pub struct HeadscaleMutationAuthorizationContext {
+    pub network_id: NetworkId,
+    pub provider_instance_id: ProviderInstanceId,
+    pub authorization_generation: Generation,
+    pub configuration_generation: Generation,
+    pub configuration_fingerprint: String,
+    pub version: String,
+    pub dirty: bool,
+    pub capability: ProviderMutationCapability,
+    pub policy_mode: MutationPolicyMode,
+    pub now: DateTime<Utc>,
+}
+
+/// Capability-validation boundary used by the concrete Headscale mutation
+/// adapter without depending on the state crate that owns production tokens.
+pub trait HeadscaleMutationAuthorization: Send {
+    fn validate_for_headscale(
+        self,
+        context: HeadscaleMutationAuthorizationContext,
+    ) -> Result<(), ProviderError>;
 }
 
 /// N0C deterministic provider contract, including future mutation simulations.

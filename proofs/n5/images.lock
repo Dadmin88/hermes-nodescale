@@ -1,0 +1,4 @@
+# Immutable linux/amd64 manifests used by the N4B disposable proof.
+HEADSCALE_IMAGE=ghcr.io/juanfont/headscale@sha256:9a4d883997cbe9de8ff58e8e11c37c204a25bd76d4c0920d16e0d944bbe05fb8
+TAILSCALE_IMAGE=tailscale/tailscale@sha256:86cb1780f73dc7ff3f8de24d132e00319d61b49a94e5adcc050660ddd4d7d5cf
+INGRESS_RUNTIME_IMAGE=debian@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
