@@ -1,20 +1,28 @@
 # Provider Contract
 
+Provider adapters are a trust boundary. Raw provider payloads are untrusted and must be validated, normalized, and classified before domain or persistence code consumes them.
+
 ## Normalization boundary
 
-Raw provider payloads are untrusted. A provider adapter must validate and normalize observations into provider-neutral Rust types before domain or persistence code consumes them. Hostnames, display names, addresses, tags, roles, and payload-supplied peer identifiers are never canonical identity.
+Provider-neutral models preserve the difference between authoritative identity evidence and mutable metadata.
 
-N2A provider configuration persists only an HTTPS origin, provider-instance identity, selected compatibility pin, opaque `secret://` reference, TLS verification policy, and permanent read-only flags. Plaintext provider credentials are runtime-only and never ordinary SQLite domain data.
+Hostnames, display names, addresses, tags, roles, and payload-supplied peer identifiers are never canonical identity.
 
-Successful complete snapshots may update Nodescale-owned observations. Provider outages preserve the previous snapshot and update only sanitized provider health/freshness state; an outage is never interpreted as provider-side deletion.
+`ProviderIdentity` combines:
 
-`ProviderIdentity` combines a configured provider instance, provider-owned node ID, and stable-key fingerprint. Provider, Nodescale, and Keryx identifiers remain non-interchangeable newtypes.
+- a configured provider instance;
+- the provider-owned canonical node ID;
+- a stable-key fingerprint used for conflict detection.
 
-N1A expands `ProviderNode` with separately typed identity evidence, conditional user and pre-auth correlation observations, display/address metadata, tags, temporal fields, and online/expiry state. Strong, conditional, mutable, display-only, and unsafe-for-identity classes are explicit rather than generic labels.
+Provider, Nodescale, and Keryx identifiers remain distinct typed values.
 
-## Read and mutation boundaries
+Successful complete snapshots may update Nodescale-owned observations. Provider outages preserve the previous successful snapshot and update only sanitized provider health and freshness state. An outage is never interpreted as provider-side deletion.
 
-`ReadOnlyProvider` is the permanent async inspection boundary for real adapters. It exposes only:
+Provider configuration stores only non-secret connection metadata and an opaque credential reference. Plaintext provider API credentials are injected at runtime and are not ordinary SQLite domain data.
+
+## Read-only provider boundary
+
+`ReadOnlyProvider` is the permanent inspection boundary for real adapters. It exposes only:
 
 - server inspection;
 - compatibility verification;
@@ -22,63 +30,93 @@ N1A expands `ProviderNode` with separately typed identity evidence, conditional 
 - exact node lookup;
 - provider health.
 
-It contains no write method. The Headscale read adapter remains on this boundary. `MutationProvider` is separate, consumes an associated authorization type by value, and is implemented by the fake and Headscale mutation adapters. The older deterministic `Provider` trait remains the N0C simulator.
+It contains no write method.
 
-Compatibility and operation mode are separate gates. `CompatibilityReport::from_inspection` requires both a compatible status and explicit adapter mutation permission. Unknown compatibility, read-only degraded mode, or a read-only adapter can never gain mutation authority merely because a server exposes write routes.
+Compatibility, provider routes, and provider-reported capabilities do not turn a read-only import into a mutation-authorized provider.
 
-## Capability truth
+## Mutation provider boundary
 
-Provider capability observations are explicit operations, not broad role-derived authority. The read-only Headscale adapter reports inspection, list, exact lookup, and health and always reports `mutation_allowed = false`. Mutation capabilities are persisted separately and authorized one operation at a time.
+`MutationProvider` is a separate interface. It consumes a provider-specific authorization value and exposes only operation-specific mutations.
 
-Mutation operations are gated behind exact known compatibility, explicit state configuration, and a state-issued single-use authorization. Unsupported operations never return apparent success. Ambiguous write outcomes remain explicit and require containment or later reconciliation.
+Mutation requires:
 
-## N3A mutation contract
+- the exact configured network and provider instance;
+- compatible runtime evidence;
+- mutation-enabled state;
+- the exact capability being requested;
+- a state-issued authorization valid for that operation.
 
-The authorized adapter exposes these operations independently only after proving an
-authenticated runtime reports the exact clean pin `version == "v0.29.3"` and
-`dirty == false`, and after verifying explicit mutation-enabled configuration
-for the exact network/provider instance. Dirty, malformed, prerelease,
-build-suffixed, future, unsupported, unreachable, authentication-failing, or
-read-only runtime evidence fails closed:
+Authorization is not inferred from a role, a server version, a successful read, or the presence of another write route.
 
-| Capability | Bounded operation | Required boundary |
+## Mutation capabilities
+
+| Capability | Bounded operation | Security boundary |
 | --- | --- | --- |
-| `EnsureNetworkPrincipal` | Ensure one explicitly named provider principal. | Principal admission only; it neither creates Nodescale identity nor grants application authority. |
-| `CreateJoinCredential` / `InvalidateJoinCredential` | Create a credential for that principal with explicit expiry and bounded use count; invalidate by its exact provider credential ID. | The returned plaintext is one-time delivery material, never ordinary persistence, audit, diagnostics, or retry input. |
-| `ReplaceNodeTags` | Replace tags with the complete requested tag set for one exact `ProviderIdentity`. | Tags remain mutable provider policy metadata, never identity or Fleet authorization. |
-| `ExpireNode` / `DeleteNode` | Expire or delete one exact `ProviderIdentity`. | Identity must be re-read and match before and, where observable, after mutation. |
-| `ManagePolicy` | Read, check, and replace provider policy. | Available only with explicit trusted `database` policy mode and isolated proof; no generic HTTP route, response shape, `updatedAt`, or version inference authorizes policy mutation. |
+| `EnsureNetworkPrincipal` | Ensure one explicitly named provider principal. | Creates provider-side admission structure only; no Nodescale or Fleet trust. |
+| `CreateJoinCredential` | Create one provider credential with explicit principal, expiry, and use count. | Plaintext is one-time delivery material and is never ordinary persistence, audit, or retry input. |
+| `InvalidateJoinCredential` | Invalidate one exact provider credential ID. | Exact-reference cleanup only. |
+| `ReplaceNodeTags` | Replace the complete desired tag set for one exact `ProviderIdentity`. | Tags remain provider policy metadata, not identity or Fleet grants. |
+| `ExpireNode` | Expire one exact `ProviderIdentity`. | Target identity must be checked against authoritative provider evidence. |
+| `DeleteNode` | Delete one exact `ProviderIdentity`. | Target identity must be checked against authoritative provider evidence. |
+| `ManagePolicy` | Read, validate, and replace provider policy. | Available only in explicitly configured and verified supported policy mode. |
 
-Capability advertisement must remain operation-specific: a compatible server,
-an enabled mutation mode, or one authorized operation does not authorize any
-other row. The provider contract has no compare-and-swap (CAS) primitive, so the
-provider must not promise CAS semantics. A write response alone is not a
-certain outcome. Record `rejected`, `unsupported`, or `ambiguous` distinctly;
-report a requested state as applied or already satisfied only after an
-authoritative read-back where the provider makes one possible. An ambiguous
-credential creation is never treated as a usable credential, is never recorded
-as confirmed, and requires containment/reconciliation rather than blind retry.
+One authorized capability never implies another.
 
-The Headscale adapter checks authorization before any network request. Every
-possibly dispatched non-credential mutation performs exactly one final
-reconciliation read. Credential creation performs no blind retry; uncertainty
-is terminally ambiguous. Policy mutation is available only in configured
-database mode, performs at most one PUT, and performs exactly one final GET
-after possible dispatch. File and unknown policy modes perform zero traffic and
-return `Unsupported`.
+## Certainty semantics
 
-None of these provider effects creates trusted Nodescale membership, verifies
-a Keryx binding, or activates Hermes Fleet enrollment, grants, scheduling, or
-execution.
+The provider contract does not assume compare-and-swap support.
+
+A write request can produce one of several meaningful states:
+
+- applied;
+- already satisfied;
+- rejected;
+- unsupported;
+- ambiguous.
+
+A transport acknowledgement is not enough to claim that state was applied. Where the provider exposes authoritative read-back, a mutation is considered certain only after the requested state is observed.
+
+Ambiguous outcomes are handled conservatively:
+
+- provider credential creation is not blindly retried because a second dispatch could create a second secret;
+- exact-reference cleanup may be retried because it cannot create a new credential;
+- unsupported or rejected operations remain explicit failures rather than apparent success.
+
+## Headscale adapter requirements
+
+The Headscale adapter validates authorization before issuing a write request.
+
+Non-credential mutations perform a final reconciliation read where the provider exposes authoritative state. Credential creation performs no blind retry. Policy mutation is allowed only in the explicitly supported policy mode and performs a final read after any possible dispatch.
+
+Unknown or unsupported policy modes produce no mutation traffic.
 
 ## Health and errors
 
-Health distinguishes healthy authenticated access, reachable but incompatible/degraded access, authentication failure, timeout, TLS failure, transport failure, and malformed provider output. Authentication material is redacted from `Debug`, `Display`, diagnostics, and errors.
+Provider health distinguishes at least:
 
-The Headscale client verifies TLS by default, requires a clean HTTPS origin, disables redirects, applies bounded connect/request timeouts and response sizes, performs no automatic retries, and deterministically parses sanitized API responses.
+- healthy authenticated access;
+- compatible or degraded read-only access;
+- authentication failure;
+- timeout;
+- TLS failure;
+- transport failure;
+- malformed provider output;
+- unsupported compatibility.
+
+Authentication material is redacted from `Debug`, `Display`, diagnostics, and errors.
+
+The Headscale client requires HTTPS, verifies TLS normally, disables redirects, applies bounded timeouts and response sizes, and performs no automatic write retries.
 
 ## Identity and trust
 
-Provider observations are evidence, not trusted membership. A normalized Headscale node cannot activate a Nodescale device, verify a Keryx binding, derive exact Hermes Fleet grants, or promote provider role/tag metadata into authorization. Pre-auth-key association is partial correlation evidence only.
+Provider observations are evidence, not trusted membership.
 
-The deterministic fake provider remains test infrastructure. Its legacy `Provider` implementation preserves mutable N0C simulation, while its async `ReadOnlyProvider` projection advertises only read capabilities, always denies mutation, and mirrors the real adapter's healthy/degraded/authentication/unreachable semantics.
+A normalized provider node cannot by itself:
+
+- activate a Nodescale device;
+- verify a Keryx binding;
+- derive Hermes Fleet grants;
+- authorize scheduling or execution;
+- promote provider tags or roles into application authorization.
+
+Pre-auth credential association is useful correlation evidence but remains insufficient as complete managed-device identity.

@@ -1,70 +1,86 @@
 # Headscale Compatibility
 
-## Selected pin
+## Supported target
 
-Nodescale N1A targets stock Headscale **v0.29.3** (`v0.29.3`, upstream commit `5aff68b5b9921db5ccb88013bb1740077ab872fb`). The release was published on **2026-07-29 at 12:51:35 UTC**. It was reverified on 2026-08-07 as the latest non-draft, non-prerelease upstream release, so the N0A pin remains both current and conservative.
+Nodescale is currently validated against stock Headscale **v0.29.3**. Compatibility is intentionally explicit and conservative: unknown, future, prerelease, malformed, or otherwise unsupported runtime versions fail closed for mutation.
 
-Primary upstream evidence:
+Upstream references for the pinned version:
 
-- [official v0.29.3 release](https://github.com/juanfont/headscale/releases/tag/v0.29.3)
-- [tagged API documentation](https://github.com/juanfont/headscale/blob/v0.29.3/docs/ref/api.md)
-- [tagged OpenAPI document](https://github.com/juanfont/headscale/blob/v0.29.3/gen/openapiv2/headscale/v1/headscale.swagger.json)
-- [tagged service schema](https://github.com/juanfont/headscale/blob/v0.29.3/proto/headscale/v1/headscale.proto)
-- [tagged node schema](https://github.com/juanfont/headscale/blob/v0.29.3/proto/headscale/v1/node.proto)
+- [v0.29.3 release](https://github.com/juanfont/headscale/releases/tag/v0.29.3)
+- [API documentation](https://github.com/juanfont/headscale/blob/v0.29.3/docs/ref/api.md)
+- [OpenAPI document](https://github.com/juanfont/headscale/blob/v0.29.3/gen/openapiv2/headscale/v1/headscale.swagger.json)
+- [service schema](https://github.com/juanfont/headscale/blob/v0.29.3/proto/headscale/v1/headscale.proto)
+- [node schema](https://github.com/juanfont/headscale/blob/v0.29.3/proto/headscale/v1/node.proto)
 
-No newer stable release existed at reverification time. There was therefore no API or identity-model change requiring a pin decision.
+The compatibility pin is a code and test contract, not a claim that the pinned release will always be the newest Headscale release.
 
 ## Read-only API surface
 
-The adapter issues only fixed `GET` requests. `/version` is public in stock Headscale and receives no bearer header; `/api/v1/*` requests are bearer-authenticated:
+The read adapter issues only fixed `GET` requests. `/version` is public in stock Headscale and receives no bearer header. `/api/v1/*` requests use bearer authentication.
 
 | Surface | Purpose |
 | --- | --- |
 | `GET /version` | Detect the running Headscale version. |
-| `GET /api/v1/health` | Prove API authentication and database connectivity. |
-| `GET /api/v1/node` | List normalized provider nodes. |
-| `GET /api/v1/node/{node_id}` | Read one node by Headscale's numeric provider node ID. |
+| `GET /api/v1/health` | Verify authenticated API access and provider health. |
+| `GET /api/v1/node` | List provider nodes. |
+| `GET /api/v1/node/{node_id}` | Read one node by Headscale's canonical numeric node ID. |
 
-The v0.29.3 OpenAPI operation for `ListNodes` has only an optional `user` filter and no pagination parameters or page token. N1A therefore does not invent pagination behavior. Unknown response fields are ignored where safe; missing required identity evidence fails closed.
+The v0.29.3 `ListNodes` operation exposes an optional `user` filter but no pagination token. The adapter therefore does not invent pagination behavior.
 
-The stock API exposes write routes, but this crate does not model or call them. Its implemented trait has no mutation methods, redirects are disabled, and all reported capability sets contain only inspection, list, lookup, and health operations.
+Unknown response fields may be ignored where safe. Missing required identity evidence fails closed.
 
-## Compatibility mapping
+## Compatibility classification
 
-| Observation | Nodescale state | Mutation |
-| --- | --- | --- |
-| Exact clean `v0.29.3` (`dirty=false`) | `compatible` | Disabled |
-| Exact `v0.29.3` with `dirty=true` | `compatible_with_constraints` | Disabled |
-| Clean `v0.29.0`–`v0.29.2` | `read_only_degraded` | Disabled |
-| Future, older-minor, prerelease, or build-suffixed version | `unsupported` | Disabled |
-| Timeout, TLS, or transport failure | `unreachable` | Disabled |
-| HTTP 401 or 403 | `authentication_failed` | Disabled |
-| Missing or malformed version evidence | `unsupported` diagnostic / malformed-response health | Disabled |
+Read compatibility and mutation eligibility are separate decisions.
 
-Unknown and future versions never inherit write capability. N1A sets `mutation_allowed = false` independently of version or server capability.
+| Runtime observation | Compatibility |
+| --- | --- |
+| Exact clean `v0.29.3` | `compatible` |
+| Exact `v0.29.3` reporting `dirty=true` | `compatible_with_constraints` |
+| Clean `v0.29.0`–`v0.29.2` | `read_only_degraded` |
+| Future, older-minor, prerelease, build-suffixed, or malformed version | `unsupported` |
+| Timeout, TLS, or transport failure | `unreachable` |
+| HTTP 401 or 403 | `authentication_failed` |
+
+A successful read classification does not grant mutation authority. Mutation additionally requires the exact supported clean runtime, explicit mutation-enabled state for the exact provider instance, and an operation-specific authorization.
 
 ## Identity-field classification
 
-The adapter preserves identity classes rather than flattening provider data into interchangeable strings:
+Provider fields are classified by how safely they can participate in identity correlation:
 
-| Headscale field | Classification | N1A use |
+| Headscale evidence | Classification | Nodescale use |
 | --- | --- | --- |
-| provider instance ID + canonical positive Headscale node `id` + SHA-256 machine-key fingerprint | Strong scoped provider identity tuple | Exact list/lookup identity within one configured provider instance; machine-key change is a conflict/rotation observation |
-| `machineKey` | Strong but replaceable / stable-conditional correlation evidence | Retained in a dedicated conditional-evidence type and fingerprinted as a conflict guard; never matched globally |
-| `nodeKey`, `discoKey` | Mutable cryptographic observations | Retained separately; never substituted for canonical identity or durable correlation |
-| user `id` and metadata | Conditional provider metadata | Observation only; user association may change |
-| pre-auth-key `id` relationship | Partial correlation evidence | Observation only; no key secret is retained |
-| hostname `name`, `givenName` | Mutable/display-only | Presentation metadata only |
-| `ipAddresses` | Mutable addressing metadata | Never identity |
-| tags | Mutable policy metadata | Never identity or authorization |
-| created/last-seen/expiry/online state | Mutable temporal/health observations | Diagnostics and future correlation support only |
+| provider instance + positive node `id` + machine-key fingerprint | Strong scoped provider identity | Exact provider-local node identity and conflict detection. |
+| `machineKey` | Strong but replaceable correlation evidence | Fingerprinted and retained as a rotation/conflict guard; never matched globally. |
+| `nodeKey`, `discoKey` | Mutable cryptographic observation | Retained separately; never substituted for canonical provider identity. |
+| user metadata | Conditional provider metadata | Observation only. |
+| pre-auth credential ID relationship | Partial correlation evidence | Useful join evidence, but not device identity. |
+| hostname / given name | Mutable presentation metadata | Display only. |
+| IP addresses | Mutable addressing metadata | Never identity. |
+| tags | Mutable provider policy metadata | Never identity or application authorization. |
+| timestamps / online / expiry | Mutable operational observations | Diagnostics and correlation support only. |
 
-Pre-auth association alone is insufficient device identity. Future join correlation still requires authenticated Nodescale session evidence, exact provider identity, and agent-bound cryptographic identity.
+Pre-auth credential association alone is insufficient for trusted device identity.
 
 ## HTTP safety
 
-Production construction accepts a clean HTTPS origin only. TLS certificate verification uses the Rustls-backed default trust behavior and cannot be disabled through the public constructor. The client applies bounded connect/request timeouts, a configurable response-size ceiling, no redirects, no automatic retries, typed transport/authentication/parsing failures, and redacted credential formatting.
+Production Headscale configuration requires a clean HTTPS origin. The adapter:
 
-## Scope and constraints
+- uses normal Rustls certificate and hostname verification;
+- provides no insecure-TLS public constructor;
+- disables redirects;
+- applies bounded connect and request timeouts;
+- applies a configurable response-size ceiling;
+- performs no automatic write retries;
+- uses typed transport, authentication, and parsing failures;
+- redacts authentication material from formatting and diagnostics.
 
-N1A performs no Headscale, Tailscale, Keryx, or Hermes Fleet mutation. It does not deploy Headscale, read Headscale's database, create users or credentials, alter tags or policy, join or delete nodes, activate Nodescale devices, bind Keryx identity, or project Fleet grants. Sanitized fixtures are the acceptance basis; no live provider proof was required or performed.
+An optional custom root is additive to system trust, bounded in size, and must contain valid CA material. It does not disable hostname or certificate verification.
+
+## Mutation compatibility
+
+The mutation adapter is capability-scoped. Compatible runtime evidence alone cannot authorize a write. Each mutation requires explicit state configuration and a single-use authorization for the exact operation.
+
+Policy management is more restrictive than ordinary node mutation and is available only when the provider's supported policy mode is explicitly configured and verified.
+
+See [Provider Contract](provider-contract.md) for operation-level semantics.

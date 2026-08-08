@@ -1,126 +1,114 @@
 # Threat Model
 
+Nodescale is designed around explicit trust boundaries and fail-closed transitions. The primary security concern is preventing weak provider or caller-controlled evidence from becoming trusted device identity or Hermes Fleet authority.
+
 ## Protected properties
 
-- A hostname, mesh address, tag, role, or self-reported peer identifier cannot become authoritative identity.
-- Roles do not grant exact Hermes Fleet operations.
-- Unknown, unreachable, unsupported, or authentication-failed providers cannot authorize mutation.
-- Stale generations cannot overwrite newer state.
-- Required state and audit evidence commit atomically.
-- Invitation plaintext and provider/device credentials are never persisted in ordinary domain records or audit metadata.
+Nodescale aims to preserve the following properties:
+
+- hostname, mesh address, tag, role, or self-reported peer identifier cannot become authoritative identity;
+- provider admission cannot become Hermes Fleet authorization by implication;
+- Nodescale roles do not automatically grant exact Hermes Fleet operations;
+- unknown, unreachable, unsupported, or authentication-failed providers cannot authorize mutation;
+- stale generations cannot overwrite newer state;
+- required state changes and audit evidence commit atomically where they form one security decision;
+- invitation plaintext and provider/device credentials do not enter ordinary domain records or audit metadata;
+- ambiguous provider outcomes are not promoted to success;
+- revocation removes application trust without depending on successful provider cleanup.
+
+## Trust boundaries
+
+Nodescale interacts with several independent authorities:
+
+- the mesh provider controls mesh admission and provider-local node state;
+- Nodescale controls managed membership and Nodescale device state;
+- Keryx controls authenticated transport peer identity;
+- Hermes Fleet controls final application authorization and execution.
+
+Compromise or spoofing in one layer must not silently grant authority owned by another layer.
 
 ## Secret-bearing values
 
-Invitation plaintext, provider API keys, provider join credentials, device credentials, and binding nonces use redacted wrappers. `Debug` and `Display` never expose their contents. APIs require an explicit exposure method at the narrow delivery boundary. SQLite stores invitation verifiers and opaque credential references, not plaintext secrets. Operator-owned secret files are expected to be owner-readable only; N0C does not implement a vault.
+Invitation plaintext, provider API keys, provider join credentials, device credentials, and binding nonces use redacted wrappers or narrow delivery types.
+
+Secret-bearing values must not be exposed through ordinary `Debug` or `Display`, persisted in audit metadata, or copied into diagnostics.
+
+SQLite stores invitation verifiers and opaque credential references rather than plaintext invitation or provider credentials.
+
+Operator-managed secret files are expected to use restrictive filesystem permissions. Nodescale does not currently provide a general-purpose secrets vault.
 
 ## Audit safety
 
-Audit events record IDs, UTC timestamp, bounded actor/source, event kind, outcome, optional generation, and sanitized structured metadata. Metadata keys suggesting secrets, tokens, passwords, credentials, API keys, private keys, or nonces are rejected. Audit records must not contain credential values or private key material.
+Audit events may record identifiers, UTC timestamps, bounded actor/source data, event kind, outcome, generations, and sanitized structured metadata.
 
-## Headscale N1A controls
+Metadata that appears to contain secrets, tokens, passwords, credentials, API keys, private keys, or nonces must be rejected or redacted. Audit records must never contain credential values or private key material.
 
-The read adapter accepts only a clean HTTPS origin, uses normal certificate verification, disables redirects, sends bearer authentication only to the configured origin, bounds connection/request time and response bytes, and exposes typed sanitized errors. Its trait contains no mutation method and issues only documented `GET` requests. The mutation adapter shares the same transport controls. Its optional custom root is additive to system trust, bounded to 64 KiB, and must contain exactly one X.509 `CA:TRUE` certificate; hostname and certificate verification remain mandatory and no insecure-TLS switch exists.
+## Provider transport controls
 
-Headscale output remains untrusted. Required provider node ID and machine-key evidence are validated before normalization. Hostnames and addresses cannot become identity. Pre-auth-key secrets are not modeled or retained; only the provider credential ID relationship is exposed as partial correlation evidence. The doctor report is sanitized and hard-codes mutation as disabled.
+The Headscale adapter accepts only clean HTTPS origins and uses normal certificate and hostname verification. Redirects are disabled so bearer credentials cannot be forwarded to another origin.
 
-## N3A mutation controls
+Connections and responses are bounded by time and size. Provider authentication material is redacted from errors and formatting.
 
-N3A requires a separate, state-issued single-use capability for principal ensure, bounded join-credential
-creation and exact invalidation, exact-node tag replacement, expiry, deletion,
-and database-mode-only policy access. Compatibility, an administrator role,
-or the presence of one provider write route cannot broaden that list; policy
-is forbidden unless its database mode is explicitly configured and was
-independently verified in the isolated proof.
+An optional custom root extends trust rather than disabling verification and is subject to size and certificate constraints.
 
-Read-only imports remain immutable identity facts and cannot issue mutation
-authority. The separate configuration binds exact network/provider identity,
-positive monotonic generations, non-secret fingerprint, exact adapter/version,
-half-open validity, policy mode, and explicit capabilities. Real authorization
-fields are private and non-cloneable; fake authorization is type-incompatible.
+Provider output remains untrusted until normalized. Hostnames, addresses, tags, user metadata, and pre-auth associations cannot become complete device identity.
 
-A mutation target is the exact scoped `ProviderIdentity`, never a hostname,
-tag, address, or request-supplied peer value. Complete desired tags are
-replaced rather than merged implicitly. Credentials have explicit principal,
-expiry, and use bounds; their plaintext may cross only the narrow delivery
-boundary and must be absent from persistence, telemetry, errors, and audit
-metadata. Invalidation refers to the exact credential ID, not a display name.
+## Provider mutation controls
 
-The provider contract offers no compare-and-swap (CAS) guarantee. A timeout, lost response, or
-uncertain provider reply is `ambiguous`, not success and not a safe trigger for
-blind retry; unsupported and rejected outcomes also remain distinct. Certainty
-requires authoritative read-back where that is observable. The isolated proof
-must leave no production provider mutation and cannot be used as evidence of
-trusted membership, a Keryx binding or provenance, or Hermes Fleet activation.
+Mutation uses a separate capability-scoped interface. Read-only provider configuration cannot issue mutation authority.
 
-## N4A invitation controls
+Each authorized mutation is bound to exact provider configuration and an exact operation. A compatible server or administrator role does not broaden the allowed capability set.
 
-The token selector is lookup-only and carries no authority. The 32-byte random
-secret is verified with a randomly salted, fixed-profile Argon2id verifier.
-Only the verifier and safe metadata persist. Invitation and provider secrets are
-returned through consuming delivery wrappers and are excluded from formatting,
-list/show views, audit metadata, SQLite text projections, and raw database/WAL
-files as checked by the disposable acceptance harness.
+Mutation targets use the full scoped provider identity rather than mutable display metadata.
 
-SQLite transactions reserve a single-use invitation and create its join session
-before provider dispatch. Cross-connection compare-and-swap predicates, not
-process locks, enforce replay resistance. Role intent is typed, bounded, and
-non-empty; administrative eligibility requires an explicit elevated-intent
-record and still grants no trusted activation.
+Provider join credentials have explicit principal, expiry, and use bounds. Their plaintext may cross only the one-time delivery boundary.
 
-N4 correlation values are never persisted directly; SQLite receives only a
-canonical SHA-256 digest. Base invitation/session identity, the one-use limit,
-and confirmed-invalidation timestamps are protected by migration constraints
-and direct-SQL triggers. State-level expiry preparation rejects pre-deadline
-calls regardless of caller or current lifecycle state.
+The provider contract does not assume compare-and-swap. Rejected, unsupported, and ambiguous outcomes remain distinct, and authoritative read-back is required where available.
 
-Provider creation is dispatched at most once. A potentially applied creation
-whose plaintext response was lost becomes terminal and cannot be retried.
-If creation confirms at the provider but local durable confirmation fails, the
-service drops the secret, immediately attempts exact-reference invalidation
-with fresh authority, and best-effort records ambiguity instead of returning an
-ordinary availability error.
-Invalidation uncertainty remains nonterminal because retrying exact-reference
-cleanup cannot create another credential. Exact-reference terminal cleanup
-requires confirmed or already-satisfied read-back evidence. A no-reference
-ambiguous creation expires locally only at its bounded deadline and does not
-claim provider invalidation evidence.
+An ambiguous credential creation is never treated as a usable credential and is never blindly retried.
 
-## N4B ingress controls
+## Invitation controls
 
-Invitation possession is the only redemption authentication factor and is not
-device identity. The token is accepted only in a strict bounded JSON body over
-verified TLS. URL, query, header, cookie, forwarded-address, hostname, and
-caller-supplied audit/correlation transport is forbidden. Responses use fixed
-small bodies, `no-store`, and no invitation or provider identifiers.
+Invitation selectors are lookup-only and carry no authorization claims. The random secret is verified using a salted fixed-profile Argon2id verifier.
 
-Monotonic per-source and global token buckets, a bounded source table, overflow
-bucket, body cap, and bounded queue run before Argon2/provider work. Unknown
-selectors perform dummy fixed-profile Argon2 work. A dedicated state-owning
-worker bounds Argon2 and provider creation concurrency to one; this is resource
-admission only. Cross-process single use still depends on SQLite transactions
-and compare-and-swap transitions.
+Only the verifier and safe invitation metadata persist.
 
-The successful bootstrap serializes directly from the consuming, redacted N4A
-delivery wrapper and is not persisted, cloned, logged, or recoverable. Transport
-loss never recreates a credential. An internal handoff is not accepted until the
-HTTP handler has serialized it; request cancellation before that point closes an
-acknowledgement channel and makes the worker revoke the exact credential. Worker
-shutdown has an explicit deadline and join result rather than detached-thread
-success. Provider failure classes do not become a
-validity oracle. A provider node linked to a pre-auth ID proves only use of that
-bearer credential—not authenticated agent identity or trusted membership.
+A successful redemption atomically reserves the invitation and creates the join session before provider dispatch. Cross-connection SQLite predicates, not process-local locks, enforce single-use behavior.
 
-The disposable client proof forbids host networking, TUN, `NET_ADMIN`, host
-Tailscale state/socket mounts, real devices, and production providers. Exact
-credential revocation, exact node deletion, resource teardown, and sanitized
-host-network equality are mandatory acceptance gates.
+Role eligibility is typed and bounded. Administrative eligibility requires explicit elevated intent and still does not grant trusted activation.
 
-## Out of scope after N4B
+Correlation values are stored as canonical digests rather than caller plaintext where direct persistence is unnecessary.
 
-N4B does not claim Keryx or Hermes Fleet trust. Authenticated correlation of the
-provider node to an agent, trusted device
-activation, and live migration require separate owner authorization. Keryx
-binding remains blocked until authoritative sender identity is supplied by
-authenticated runtime provenance. Fleet projection remains blocked until managed
-enrollment, exact grants, generations, reconciliation, provenance, and
-revocation have a language-neutral local control contract and acceptance tests.
+## Redemption ingress controls
+
+Invitation possession is the only redemption factor accepted by the HTTP ingress. It proves possession of a capability, not device identity.
+
+The token is accepted only in a strict bounded JSON body over verified TLS. Tokens and caller-controlled identity claims are not accepted through URLs, query strings, cookies, forwarded headers, hostnames, or audit fields.
+
+Resource admission occurs before expensive verification and provider work using bounded per-source and global controls, a bounded source table, request-body limit, and bounded queue.
+
+Unknown selectors receive fixed-profile dummy Argon2 work after admission to reduce invitation-state oracle differences.
+
+The state-owning worker bounds expensive work, but SQLite remains authoritative for cross-process replay safety.
+
+Successful bootstrap material is not persisted or recoverable. Cancellation before the HTTP handoff is completed triggers exact credential cleanup rather than abandoning an active secret.
+
+## Revocation and cleanup
+
+Application trust is removed before provider cleanup is relied upon. A provider outage may leave stale mesh state temporarily, but it must not preserve generated Hermes Fleet authority.
+
+Exact provider cleanup remains retryable and is tracked separately from application-trust revocation.
+
+Disposable acceptance tooling must avoid production providers and real devices, and it must restore runtime, listener, repository, and host-network invariants after completion.
+
+## Trust not yet established by this repository
+
+The current implementation does not claim that provider admission establishes:
+
+- authenticated Keryx sender identity;
+- a verified Keryx binding;
+- trusted Nodescale device activation;
+- managed Hermes Fleet enrollment or grants;
+- Hermes Fleet scheduling or execution permission.
+
+Those trust transitions require their own authenticated evidence and integration contracts.

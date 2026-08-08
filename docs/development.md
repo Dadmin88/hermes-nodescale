@@ -3,12 +3,15 @@
 ## Prerequisites
 
 - Stable Rust with `rustfmt` and `clippy`.
-- No live Headscale, Keryx, Hermes Fleet, Tailscale, or network access is required for the default checks.
-- SQLite is compiled through `rusqlite`'s bundled feature for reproducible CI.
+- Python 3 for repository hygiene and optional acceptance tooling.
+- No live Headscale, Keryx, Hermes Fleet, Tailscale, or external network access is required for the default workspace checks.
+- SQLite is compiled through `rusqlite`'s bundled feature for reproducible local and CI behavior.
 
-## Checks
+## Standard validation
 
-```text
+Run the full local validation set from the repository root:
+
+```bash
 cargo metadata --no-deps --format-version 1
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -20,26 +23,56 @@ TREE="$(git write-tree)"
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_public_hygiene.py --repo "$(pwd)" --tree "$TREE"
 ```
 
-## Dependency rationale
-
-- `serde` / `serde_json`: typed durable records and sanitized structured audit metadata.
-- `chrono`: UTC timestamps with serialization.
-- `uuid`: opaque strongly typed Nodescale-owned identifiers.
-- `thiserror`: typed domain, state, and provider failures.
-- `sha2`: stable non-secret fingerprints for provider/runtime evidence.
-- `argon2`, `rand`, and `base64`: fixed-profile salted invitation verification and opaque 256-bit token generation.
-- `rusqlite` with bundled SQLite: small synchronous transactional state layer with no runtime/framework.
-- `async-trait`: narrow object-safe asynchronous read boundary shared by real and fake providers.
-- `reqwest` with Rustls: HTTPS-only real-provider reads, URL/origin validation, normal certificate verification, and bounded requests.
-- direct `rustls` ring provider selection: deterministic process-level crypto backend when client and server TLS feature sets coexist.
-- `axum` / `axum-server`: the single strict N4B redemption route and verified-TLS serving boundary.
-- `url`: canonical validation of the public Headscale login origin returned in bootstrap material.
-- `semver`: deterministic fail-closed Headscale version classification.
-- `tokio`: bounded ingress channel/current-thread worker plus deterministic transport and timeout tests.
-- `tempfile` (tests only): isolated restart-safe SQLite tests.
-
-No general web framework surface, plugin system, message broker, cache, distributed consensus library, or external database is included. Axum is confined to one N4B route. The Headscale crate remains a client library only.
+The default checks are designed to be deterministic and to avoid dependence on production services.
 
 ## Test discipline
 
-Behavior changes start with a focused failing test. Pure lifecycle rules stay in `nodescale-domain`; persistence tests use temporary or in-memory Nodescale-owned databases; provider behavior uses deterministic loopback servers and the fake provider. The ignored `disposable_provider` test remains the N4A credential-only proof. The retained `proofs/n4b/run.py` harness is the only supported N4B join acceptance path: it requires an exact candidate tree, extracts and builds that tree with locked dependencies and an external target directory, pins and platform-checks every runtime image, creates an isolated bridge, passes provider authority by owner-only file, runs ingress and clients without capabilities/host networking/TUN, and fails closed unless runtime cleanup and repository/host invariants hold. Its secret-free external JSON manifest—not source presence—establishes a completed run. Neither ignored proof is part of default CI.
+Keep behavior close to the layer that owns it:
+
+- pure lifecycle and authorization rules belong in `nodescale-domain`;
+- persistence behavior belongs in `nodescale-state` tests using temporary or in-memory Nodescale-owned databases;
+- provider behavior should use the deterministic fake provider or bounded loopback servers;
+- integration tests must preserve the same identity and capability boundaries as production code;
+- secret-bearing values must not appear in fixtures, snapshots, logs, diagnostics, or failure messages.
+
+Behavior changes should begin with a focused failing test when practical. Security-sensitive state transitions should include replay, stale-generation, ambiguous-outcome, and restart cases where applicable.
+
+## Acceptance tooling
+
+The repository includes optional disposable provider acceptance tooling under `proofs/`. It is intentionally separate from default CI because it launches pinned Headscale and Tailscale runtime images and validates a complete provider-join flow.
+
+The harness is expected to:
+
+- operate on an exact candidate Git tree;
+- use locked Rust dependencies and an external target directory;
+- verify pinned runtime images before use;
+- isolate runtime networking;
+- avoid host networking, TUN access, and unnecessary Linux capabilities;
+- keep provider authority in owner-readable temporary files;
+- validate single-use redemption and exact provider credential association;
+- revoke the credential and delete the disposable provider node during cleanup;
+- fail if repository, listener, runtime-root, or host-network invariants are not restored.
+
+Acceptance evidence is useful for integration assurance, but it does not by itself establish trusted Nodescale, Keryx, or Hermes Fleet identity.
+
+## Dependency rationale
+
+Key workspace dependencies are intentionally narrow:
+
+- `serde` / `serde_json` — typed durable records and structured metadata.
+- `chrono` — UTC timestamps and serialization.
+- `uuid` — opaque strongly typed Nodescale identifiers.
+- `thiserror` — typed failure surfaces.
+- `sha2` — stable non-secret fingerprints and correlation digests.
+- `argon2`, `rand_core`, and `base64` — invitation verification and opaque token generation.
+- `rusqlite` with bundled SQLite — synchronous transactional state without an external database service.
+- `async-trait` — object-safe asynchronous provider boundaries.
+- `reqwest` with Rustls — HTTPS provider transport with normal certificate verification.
+- `rustls` — deterministic TLS provider selection for client/server coexistence.
+- `axum` / `axum-server` — the bounded redemption HTTP surface.
+- `url` — canonical validation of provider login origins.
+- `semver` — deterministic provider-version classification.
+- `tokio` — bounded ingress, transport, and timeout coordination.
+- `tempfile` — isolated test state.
+
+Nodescale deliberately avoids introducing a message broker, cache service, distributed consensus layer, or external database into the current architecture.

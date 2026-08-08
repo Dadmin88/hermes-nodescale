@@ -1,11 +1,11 @@
 # ADR 0002: Keryx Binding Provenance Contract
 
-**Status:** Accepted requirement; implementation blocked on future Keryx extension
+**Status:** Accepted
 **Date:** 2026-08-07
 
 ## Context
 
-Current generic Keryx task/sender surfaces do not provide the narrow, unforgeable provenance contract required to bind a Nodescale device to a Keryx peer. Generic task idempotency is not one-time nonce consumption, and generic execution paths violate the zero-run requirement.
+Generic Keryx task and sender surfaces do not provide the narrow, unforgeable provenance contract required to bind a Nodescale device to a Keryx peer. Generic task idempotency is not equivalent to one-time nonce consumption, and a device-binding operation must not create Hermes execution work as a side effect.
 
 ## Decision
 
@@ -16,20 +16,20 @@ The operation:
 - is non-execution control traffic;
 - creates zero Hermes runs and zero Fleet execution bindings;
 - receives authoritative sender peer ID only through authenticated Keryx runtime provenance;
-- does not require an authoritative peer ID in its request payload;
-- binds one network/device/join-session/nonce to one sender;
+- does not accept an authoritative peer ID from the request payload;
+- binds one network, device, join session, and nonce to one authenticated sender;
 - atomically consumes the nonce;
 - permits safe identical replay and rejects conflicting replay;
-- records binding generation and supports explicit rotation.
+- records a binding generation and supports explicit rotation.
 
-Conceptual request fields are `network_id`, `device_id`, `join_session_id`, `nonce`, and `agent_version`. Conceptual handler context includes authenticated sender, destination, operation, and session/provenance.
+Conceptual request fields are `network_id`, `device_id`, `join_session_id`, `nonce`, and `agent_version`. Conceptual handler context includes authenticated sender, destination, operation, and session provenance.
 
 ## Consequences
 
-Nodescale N0C-N6 can proceed independently. N7 and live trusted activation remain blocked until this surface exists and passes spoofing, replay, expiry, conflict, rotation, zero-run, and zero-binding tests.
+Nodescale components that do not depend on verified Keryx provenance can operate independently. Trusted device activation remains blocked until the binding surface exists and passes spoofing, replay, expiry, conflict, rotation, zero-run, and zero-execution-binding tests.
 
 ## Rejected Alternatives
 
-- Interpret generic `sender_peer_id` as sufficient proof.
+- Interpret a generic `sender_peer_id` field as sufficient proof.
 - Put authoritative `peer_id` in the request body.
-- Implement binding as a generic Hermes/Fleet delegated task.
+- Implement identity binding as a generic Hermes or Fleet delegated task.
