@@ -161,7 +161,8 @@ and control, on terms that prohibit them from making any copies of
 your copyrighted material outside their relationship with you.
 
   Conveying under any other circumstances is permitted solely under
-the conditions below.  Sublicensing is not allowed; section 10 makes it unnecessary.
+the conditions stated below.  Sublicensing is not allowed; section 10
+makes it unnecessary.
 
   3. Protecting Users' Legal Rights From Anti-Circumvention Law.
 
@@ -408,9 +409,10 @@ prior to 60 days after the cessation.
 
   Moreover, your license from a particular copyright holder is
 reinstated permanently if the copyright holder notifies you of the
-violation, this is the first time you have received notice of violation
-from that copyright holder, and you cure the violation prior to 30 days
-after receipt of the notice.
+violation by some reasonable means, this is the first time you have
+received notice of violation of this License (for any work) from that
+copyright holder, and you cure the violation prior to 30 days after
+your receipt of the notice.
 
   Termination of your rights under this section does not terminate the
 licenses of parties who have received copies or rights from you under
@@ -507,12 +509,15 @@ work and works based on it.
   A patent license is "discriminatory" if it does not include within
 the scope of its coverage, prohibits the exercise of, or is
 conditioned on the non-exercise of one or more of the rights that are
-specifically granted under this License.  You may not convey a covered
+specifically granted in this License.  You may not convey a covered
 work if you are a party to an arrangement with a third party that is
 in the business of distributing software, under which you make payment
 to the third party based on the extent of your activity of conveying
 the work, and under which the third party grants, to any of the parties
 who would receive the covered work, a discriminatory patent license
+(a) in connection with copies of the covered work conveyed by you (or
+copies made from those copies), or (b) primarily for and in connection
+with specific products or compilations that contain the covered work,
 unless you entered into that arrangement, or that patent license was
 granted, prior to 28 March 2007.
 
@@ -572,7 +577,7 @@ ever published by the Free Software Foundation.
   If the Program specifies that a proxy can decide which future
 versions of the GNU Affero General Public License can be used, that
 proxy's public statement of acceptance of a version permanently
-authorizes you to choose the future version.
+authorizes you to choose that version for the Program.
 
   Later license versions may give you additional or different
 permissions.  However, no additional obligations are imposed on any
