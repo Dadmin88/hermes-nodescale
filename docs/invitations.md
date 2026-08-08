@@ -4,7 +4,32 @@
 
 N4A adds the Nodescale invitation layer above the accepted N3A provider-mutation primitives. It can issue an opaque Nodescale invitation, reserve one durable join session, create one bounded provider credential, deliver that provider credential once, and invalidate the exact provider credential during revocation or expiry.
 
-N4A does **not** perform a Tailscale device join. It does not activate a Nodescale device, establish a Keryx binding, enroll or grant Hermes Fleet authority, or prove trusted membership.
+N4A itself does **not** perform a Tailscale device join. N4B transports one invitation through a bounded ingress and retains an exact-tree disposable provider-join acceptance harness. A completed run is established only by its tree-bound external evidence manifest; it does not activate a Nodescale device, establish a Keryx binding, enroll or grant Hermes Fleet authority, or prove trusted membership.
+
+## N4B redemption transport
+
+The only network route is `POST /v1/redemptions` over verified TLS. Its strict
+bounded JSON body contains exactly `invitation_token`. Tokens are forbidden from
+URLs, query strings, headers, cookies, logs, labels, and caller-controlled audit
+metadata. Forwarded peer headers are not trusted.
+
+Per-source and global admission runs before body parsing and Argon2 work. Source
+state, the overflow bucket, and the worker queue are bounded in memory. Unknown
+selectors receive fixed-profile dummy Argon2 work after admission. The single
+state-owning worker bounds expensive verification and provider creation to one;
+SQLite, not that worker, remains authoritative for cross-process replay safety.
+
+Malformed envelopes are fixed invalid requests. Unknown, wrong, expired,
+revoked, consumed, provider-rejected, and ambiguous redemptions share one small
+non-redeemable response. Perimeter exhaustion is retryable without consulting
+invitation state. Successful responses are `no-store`, close the connection,
+and contain only `login_server`, optional public `root_ca_pem`, and `auth_key`.
+The state-owning worker does not relinquish cleanup responsibility merely because
+an internal response channel accepted the delivery. The handler must consume,
+serialize, and acknowledge the handoff in one poll; cancellation before that
+point closes the acknowledgement and triggers exact credential revocation.
+Worker shutdown is explicit, deadline-bounded, and joined after in-flight
+containment completes.
 
 ## Invitation token
 
@@ -76,16 +101,21 @@ Automated acceptance covers:
 - revocation and expiry settlement;
 - deterministic fake-provider dispatch counts.
 
-The release acceptance proof runs a disposable Headscale v0.29.3 image pinned by OCI digest over verified loopback TLS. It creates the synthetic provider principal directly because invitation service does not own principal provisioning, then executes invitation create, redeem, replay rejection, and revoke through `InvitationService` and the real Headscale mutation adapter. It verifies zero provider nodes and zero Nodescale device, Keryx, and Fleet counters. No device join occurs.
+The N4A release proof runs a disposable Headscale v0.29.3 image pinned by OCI digest over verified loopback TLS. It creates the synthetic provider principal directly because invitation service does not own principal provisioning, then executes invitation create, redeem, replay rejection, and revoke through `InvitationService` and the real Headscale mutation adapter. It verifies zero provider nodes and zero Nodescale device, Keryx, and Fleet counters.
 
-## Deferred after N4A
+The retained N4B proof adds the ingress and a pinned Tailscale v1.98.10 userspace
+client. Two isolated source addresses race one invitation; exactly one bootstrap
+is delivered and replay is rejected. The joined Headscale node must reference
+the exact durable pre-auth credential ID. After client stop, the exact credential
+is revoked and exact node deleted. Zero nodes, proof resources, listeners,
+runtime roots, secrets, and host-network changes may remain.
+
+## Deferred after N4B
 
 The following remain blocked on separate owner authorization and acceptance criteria:
 
-- transporting an invitation to an untrusted client;
-- performing a real Tailscale/Headscale device join;
 - correlating the joined provider node to authenticated agent identity;
 - activating a trusted Nodescale device;
 - creating a Keryx binding from authenticated runtime provenance;
 - projecting managed enrollment or grants into Hermes Fleet;
-- CLI, API, or web-console surfaces for operators and users.
+- operator invitation issuance, CLI, and web-console surfaces.

@@ -1,10 +1,10 @@
 # Nodescale
 
-Nodescale is a small private-device membership and identity control plane for Hermes Fleet. This repository contains the accepted N0C Rust foundation, the N1A/N2A read-only Headscale import and reconciliation path, the N3A capability-separated Headscale mutation provider, and the N4A invitation/join-session service.
+Nodescale is a small private-device membership and identity control plane for Hermes Fleet. This repository contains the accepted N0C Rust foundation, the N1A/N2A read-only Headscale import and reconciliation path, the N3A capability-separated Headscale mutation provider, the N4A invitation/join-session service, and the N4B bounded redemption ingress.
 
 ## Status
 
-N2A can import explicit read-only Headscale configuration, perform discovery, persist normalized provider observations, reconcile drift and conflicts, and expose sanitized doctor inventory. N3A adds separately configured, state-authorized provider mutation primitives for the exact clean Headscale v0.29.3 pin. N4A adds opaque single-use invitations, durable join sessions, and exactly-once coupling to bounded provider credentials. It does **not** deploy Headscale, join devices, bind Keryx identities, activate trusted membership, or project trust into Hermes Fleet.
+N2A can import explicit read-only Headscale configuration, perform discovery, persist normalized provider observations, reconcile drift and conflicts, and expose sanitized doctor inventory. N3A adds separately configured, state-authorized provider mutation primitives for the exact clean Headscale v0.29.3 pin. N4A adds opaque single-use invitations, durable join sessions, and exactly-once coupling to bounded provider credentials. N4B adds a single verified-TLS redemption route plus an exact-tree disposable Tailscale/Headscale acceptance harness. A completed join claim requires the harness's external evidence manifest for the exact candidate tree; source presence alone is not execution evidence. N4B does **not** deploy production Headscale, bind Keryx identities, activate trusted membership, or project trust into Hermes Fleet.
 
 **A Headscale node appearing in Nodescale discovery does not make it a trusted Hermes Fleet node.**
 
@@ -58,7 +58,32 @@ retried. Revocation and expiry invalidate the exact provider reference and stay
 nonterminal when provider certainty is ambiguous. The disposable production
 proof exercised create, redeem, replay rejection, and revoke through the real
 Headscale v0.29.3 adapter while provider-node and all trusted-activation counters
-remained zero. A real device join remains explicitly deferred.
+remained zero. A real device join was explicitly deferred from N4A.
+
+## N4B redemption-ingress boundary
+
+N4B exposes only `POST /v1/redemptions`. The strict JSON body contains one
+opaque invitation token; URLs, query strings, headers, cookies, forwarded peer
+claims, hostnames, and client-supplied audit identities cannot carry or augment
+the capability. Possession authenticates redemption but does not authenticate a
+device or agent identity.
+
+Per-source and global monotonic token buckets run before parsing or Argon2 work,
+with a bounded source table and worker queue. A dedicated single-thread worker
+owns `StateStore`, `InvitationService`, and provider authority, bounding Argon2
+and provider creation concurrency to one while SQLite remains the exactly-once
+security boundary across processes. The successful response contains only the
+validated Headscale login origin, optional public CA material, and the consuming
+one-time provider credential. Errors and caches cannot expose invitation state.
+
+The retained acceptance harness must race two isolated redeemers, accept exactly one, reject
+replay, and run a pinned Tailscale v1.98.10 userspace client with no capabilities,
+TUN device, host socket, or host network. Headscale v0.29.3 observes exactly one
+node whose pre-auth ID matches the durable credential reference. That is provider
+credential association only—not trusted device identity. The client is stopped,
+the exact credential is revoked through `InvitationService`, the exact node is
+deleted. Acceptance requires exact-tree evidence of zero runtime residue, unchanged
+repository and host-network invariants, and separately reported retained image cache.
 
 ## Workspace
 
@@ -68,6 +93,7 @@ remained zero. A real device join remains explicitly deferred.
 - `crates/nodescale-provider-fake` — deterministic in-memory provider for tests.
 - `crates/nodescale-provider-headscale` — real HTTPS Headscale v0.29.3 inspection and explicitly authorized mutation adapters.
 - `crates/nodescale-invitation` — opaque invitation issuance, durable redemption, one-time provider-credential delivery, and conservative cleanup orchestration.
+- `crates/nodescale-redemption-ingress` — bounded verified-TLS capability redemption routed through `InvitationService`.
 
 ## Development
 

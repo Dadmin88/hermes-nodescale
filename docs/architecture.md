@@ -12,7 +12,7 @@ N2A imports an explicitly configured provider instance and persists normalized o
 
 ## Workspace crates
 
-The workspace deliberately has five crates. The domain crate is pure. State owns one SQLite database and never reads provider, Keryx, or Hermes Fleet databases. Provider models are normalized before they can enter trusted state. The fake provider is deterministic test infrastructure, not production identity evidence. The Headscale crate implements both the permanent async read-only trait and a separate associated-type mutation trait; the read-only trait contains no mutation method.
+The workspace deliberately separates domain, state, provider contracts, provider adapters, invitation lifecycle, and redemption transport. The domain crate is pure. State owns one SQLite database and never reads provider, Keryx, or Hermes Fleet databases. Provider models are normalized before they can enter trusted state. The fake provider is deterministic test infrastructure, not production identity evidence. The Headscale crate implements both the permanent async read-only trait and a separate associated-type mutation trait; the read-only trait contains no mutation method. The redemption-ingress crate is a transport adapter around `InvitationService`, not a second lifecycle implementation.
 
 ## Identity separation
 
@@ -88,10 +88,44 @@ used file-backed state and verified that invitation and provider plaintext were
 absent from the database files. Provider node inventory and all Nodescale trust
 counters remained zero.
 
+## N4B bounded redemption ingress
+
+N4B adds one transport capability: verified-TLS `POST /v1/redemptions` with a
+strict token-only body. The peer socket address is the only admission source;
+forwarded headers and caller-supplied identity/correlation fields are ignored.
+Invitation possession authorizes one redemption attempt but proves no device,
+agent, Keryx, or Fleet identity.
+
+The async router charges peer-derived source/global admission before validating
+the bounded envelope, then hands a
+canonical `InvitationToken` to a bounded channel. A dedicated current-thread
+runtime owns the non-`Sync` `StateStore`, `InvitationService`, provider, and
+state authorization issuer. This intentionally limits Argon2 and provider
+creation concurrency to one. Process-local admission protects resources;
+SQLite reservation and compare-and-swap state remain authoritative for replay
+and exactly-once dispatch across independent ingress processes.
+
+The bootstrap response has no durable or cloneable representation. The worker
+retains exact cleanup responsibility until a consuming handoff has been
+serialized and synchronously acknowledged by the HTTP handler. If the request
+future disappears before that acknowledgement, the worker revokes the exact
+credential rather than abandoning an active unrecoverable secret. The worker
+has an explicit shutdown signal, bounded wait result, and joined thread handle;
+timeouts are reported rather than treated as successful teardown. A successful
+handoff becomes a no-store response containing only the
+validated Headscale login origin, optional public CA PEM, and one-time auth key.
+The response does not include Nodescale IDs, provider references, roles, tags,
+hostnames, or trust claims.
+
+When invoked for an exact Git tree, the retained acceptance harness runs ingress,
+Headscale, two redeemers, and a
+Tailscale userspace client on one disposable bridge. Exact pre-auth credential
+association is observable provider evidence, but authenticated agent-to-node
+identity remains deferred.
+
 ## Explicitly deferred
 
-No server, agent, CLI, Keryx adapter, Fleet adapter, privileged helper, web
-console, deployment tooling, distributed consensus, device join, authenticated
-agent-to-provider-node correlation, or live activation is added by N4A.
-Transporting invitations to clients and exposing operator-facing invitation APIs
-also remain separate work.
+No general operator API, invitation-issuance server, agent, CLI, Keryx adapter,
+Fleet adapter, privileged helper, web console, deployment tooling, distributed
+consensus, authenticated agent-to-provider-node correlation, or live activation
+is added by N4B. Trusted activation remains separate work.

@@ -59,7 +59,7 @@ secret is verified with a randomly salted, fixed-profile Argon2id verifier.
 Only the verifier and safe metadata persist. Invitation and provider secrets are
 returned through consuming delivery wrappers and are excluded from formatting,
 list/show views, audit metadata, SQLite text projections, and raw database/WAL
-files in the disposable proof.
+files as checked by the disposable acceptance harness.
 
 SQLite transactions reserve a single-use invitation and create its join session
 before provider dispatch. Cross-connection compare-and-swap predicates, not
@@ -85,10 +85,40 @@ requires confirmed or already-satisfied read-back evidence. A no-reference
 ambiguous creation expires locally only at its bounded deadline and does not
 claim provider invalidation evidence.
 
-## Out of scope after N4A
+## N4B ingress controls
 
-N4A does not claim network, Keryx, or Hermes Fleet trust. A real device join,
-authenticated correlation of that provider node to an agent, trusted device
+Invitation possession is the only redemption authentication factor and is not
+device identity. The token is accepted only in a strict bounded JSON body over
+verified TLS. URL, query, header, cookie, forwarded-address, hostname, and
+caller-supplied audit/correlation transport is forbidden. Responses use fixed
+small bodies, `no-store`, and no invitation or provider identifiers.
+
+Monotonic per-source and global token buckets, a bounded source table, overflow
+bucket, body cap, and bounded queue run before Argon2/provider work. Unknown
+selectors perform dummy fixed-profile Argon2 work. A dedicated state-owning
+worker bounds Argon2 and provider creation concurrency to one; this is resource
+admission only. Cross-process single use still depends on SQLite transactions
+and compare-and-swap transitions.
+
+The successful bootstrap serializes directly from the consuming, redacted N4A
+delivery wrapper and is not persisted, cloned, logged, or recoverable. Transport
+loss never recreates a credential. An internal handoff is not accepted until the
+HTTP handler has serialized it; request cancellation before that point closes an
+acknowledgement channel and makes the worker revoke the exact credential. Worker
+shutdown has an explicit deadline and join result rather than detached-thread
+success. Provider failure classes do not become a
+validity oracle. A provider node linked to a pre-auth ID proves only use of that
+bearer credential—not authenticated agent identity or trusted membership.
+
+The disposable client proof forbids host networking, TUN, `NET_ADMIN`, host
+Tailscale state/socket mounts, real devices, and production providers. Exact
+credential revocation, exact node deletion, resource teardown, and sanitized
+host-network equality are mandatory acceptance gates.
+
+## Out of scope after N4B
+
+N4B does not claim Keryx or Hermes Fleet trust. Authenticated correlation of the
+provider node to an agent, trusted device
 activation, and live migration require separate owner authorization. Keryx
 binding remains blocked until authoritative sender identity is supplied by
 authenticated runtime provenance. Fleet projection remains blocked until managed

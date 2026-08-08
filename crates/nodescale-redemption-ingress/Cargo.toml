@@ -1,0 +1,32 @@
+[package]
+name = "nodescale-redemption-ingress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded authenticated redemption ingress for Nodescale invitations"
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+chrono.workspace = true
+nodescale-domain = { path = "../nodescale-domain" }
+nodescale-invitation = { path = "../nodescale-invitation" }
+nodescale-provider = { path = "../nodescale-provider" }
+nodescale-state = { path = "../nodescale-state" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+url = "2"
+zeroize.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+nodescale-provider-fake = { path = "../nodescale-provider-fake" }
+nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
