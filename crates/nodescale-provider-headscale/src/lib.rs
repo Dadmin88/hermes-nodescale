@@ -536,7 +536,7 @@ impl HeadscaleProvider {
         };
         let mut constraints = vec![
             "N1A adapter is strictly read-only".into(),
-            "pre-auth association is partial correlation evidence only".into(),
+            "pre-auth association is authenticated provider-registration evidence only; it is never Nodescale trust".into(),
         ];
         if version.dirty {
             constraints.push("Headscale build reports uncommitted source changes".into());
@@ -1797,7 +1797,7 @@ fn normalize_node(
             canonical_positive_u64(&key.id, "invalid Headscale pre-auth key ID").map(
                 |credential_id| PreAuthCorrelationObservation {
                     credential_id,
-                    association: PreAuthAssociationStrength::Partial,
+                    association: PreAuthAssociationStrength::ProviderAuthenticatedRegistration,
                 },
             )
         })

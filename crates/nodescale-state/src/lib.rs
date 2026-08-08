@@ -8,8 +8,8 @@ use nodescale_domain::{
     Revocation, RevocationState,
 };
 use nodescale_provider::{
-    CompatibilityStatus, MutationPolicyMode, ProviderError, ProviderMutationCapability,
-    ProviderNode, ReadOnlyProvider, ServerInspection,
+    CompatibilityStatus, MutationPolicyMode, PreAuthAssociationStrength, ProviderError,
+    ProviderMutationCapability, ProviderNode, ReadOnlyProvider, ServerInspection,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -22,13 +22,17 @@ use std::{
 };
 use thiserror::Error;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 4;
+mod n5;
+pub use n5::*;
+
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 const MUTATION_AUTHORIZATION_MIGRATION: &str =
     include_str!("../migrations/0003_mutation_authorization.sql");
 const INVITATION_LIFECYCLE_MIGRATION: &str =
     include_str!("../migrations/0004_invitation_lifecycle.sql");
+const DEVICE_TRUST_MIGRATION: &str = include_str!("../migrations/0005_device_trust.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -671,6 +675,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(DISCOVERY_MIGRATION))
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -687,6 +692,7 @@ impl StateStore {
                 .execute_batch(DISCOVERY_MIGRATION)
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -702,6 +708,7 @@ impl StateStore {
             let migration_result = connection
                 .execute_batch(MUTATION_AUTHORIZATION_MIGRATION)
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -716,9 +723,25 @@ impl StateStore {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
             let migration_result = connection
                 .execute_batch(INVITATION_LIFECYCLE_MIGRATION)
+                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 4 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result =
+                connection
+                    .execute_batch(DEVICE_TRUST_MIGRATION)
+                    .and_then(|()| {
+                        connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                    });
             match migration_result {
                 Ok(()) => connection.execute_batch("COMMIT;")?,
                 Err(error) => {

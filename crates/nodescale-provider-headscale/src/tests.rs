@@ -44,7 +44,7 @@ fn selected_version_nodes_normalize_strong_identity_and_metadata() {
     assert_eq!(node.user.as_ref().unwrap().id, "7");
     assert_eq!(
         node.pre_auth.as_ref().unwrap().association,
-        PreAuthAssociationStrength::Partial
+        PreAuthAssociationStrength::ProviderAuthenticatedRegistration
     );
     assert_eq!(node.pre_auth.as_ref().unwrap().credential_id, "9");
 }

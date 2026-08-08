@@ -88,6 +88,14 @@ used file-backed state and verified that invitation and provider plaintext were
 absent from the database files. Provider node inventory and all Nodescale trust
 counters remained zero.
 
+## N5 authoritative device-trust service
+
+`nodescale-device-trust` is the N5 orchestration boundary. It reads a secret-free confirmed N4 join context from `StateStore`, queries the configured read-only provider, and requires exactly one provider node with the exact provider-native pre-auth credential reference and verified machine-key fingerprint. It then atomically creates a Nodescale UUID device, separate provider binding, and untrusted state. It does not expose HTTP or own provider mutation.
+
+SQLite schema v5 adds N5 identity, binding, trust authority/capability, one-time authorization, trust state, and append-only decision tables. Partial unique indexes restrict active bindings. Triggers enforce immutable identity/provenance, forward-only binding state, exact authorization consumption, decision-bound trust revision, append-only history, and active-binding activation. See [device-trust.md](device-trust.md).
+
+The service exposes structured current-trust queries for later N6 consumption. N5 never imports or invokes Keryx, Fleet, or Hermes.
+
 ## N4B bounded redemption ingress
 
 N4B adds one transport capability: verified-TLS `POST /v1/redemptions` with a

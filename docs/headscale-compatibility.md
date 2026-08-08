@@ -59,7 +59,7 @@ The adapter preserves identity classes rather than flattening provider data into
 | tags | Mutable policy metadata | Never identity or authorization |
 | created/last-seen/expiry/online state | Mutable temporal/health observations | Diagnostics and future correlation support only |
 
-Pre-auth association alone is insufficient device identity. Future join correlation still requires authenticated Nodescale session evidence, exact provider identity, and agent-bound cryptographic identity.
+Pre-auth association alone is insufficient device identity. N5 combines the exact provider-native pre-auth reference with a durably confirmed, single-use N4 join session, the exact scoped provider identity, and verified machine-key fingerprint evidence before generating a logical Nodescale `DeviceId`. This identifies the joined provider registration but does not authenticate a Keryx runtime or grant trust; those remain separate boundaries.
 
 ## HTTP safety
 

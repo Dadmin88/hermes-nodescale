@@ -21,7 +21,7 @@ Audit events record IDs, UTC timestamp, bounded actor/source, event kind, outcom
 
 The read adapter accepts only a clean HTTPS origin, uses normal certificate verification, disables redirects, sends bearer authentication only to the configured origin, bounds connection/request time and response bytes, and exposes typed sanitized errors. Its trait contains no mutation method and issues only documented `GET` requests. The mutation adapter shares the same transport controls. Its optional custom root is additive to system trust, bounded to 64 KiB, and must contain exactly one X.509 `CA:TRUE` certificate; hostname and certificate verification remain mandatory and no insecure-TLS switch exists.
 
-Headscale output remains untrusted. Required provider node ID and machine-key evidence are validated before normalization. Hostnames and addresses cannot become identity. Pre-auth-key secrets are not modeled or retained; only the provider credential ID relationship is exposed as partial correlation evidence. The doctor report is sanitized and hard-codes mutation as disabled.
+Headscale output remains untrusted. Required provider node ID and machine-key evidence are validated before normalization. Hostnames and addresses cannot become identity. Pre-auth-key secrets are not modeled or retained. The authenticated Headscale node record's exact credential-ID linkage is classified as provider-authenticated registration evidence; generic partial associations remain non-authorizing. The doctor report is sanitized and hard-codes mutation as disabled.
 
 ## N3A mutation controls
 
@@ -107,20 +107,21 @@ HTTP handler has serialized it; request cancellation before that point closes an
 acknowledgement channel and makes the worker revoke the exact credential. Worker
 shutdown has an explicit deadline and join result rather than detached-thread
 success. Provider failure classes do not become a
-validity oracle. A provider node linked to a pre-auth ID proves only use of that
-bearer credential—not authenticated agent identity or trusted membership.
+validity oracle. A provider node linked to an exact pre-auth ID is authenticated provider-registration evidence, not authenticated application/Keryx identity or trusted membership.
 
 The disposable client proof forbids host networking, TUN, `NET_ADMIN`, host
 Tailscale state/socket mounts, real devices, and production providers. Exact
 credential revocation, exact node deletion, resource teardown, and sanitized
 host-network equality are mandatory acceptance gates.
 
-## Out of scope after N4B
+## N5 identity and trust controls
 
-N4B does not claim Keryx or Hermes Fleet trust. Authenticated correlation of the
-provider node to an agent, trusted device
-activation, and live migration require separate owner authorization. Keryx
-binding remains blocked until authoritative sender identity is supplied by
-authenticated runtime provenance. Fleet projection remains blocked until managed
-enrollment, exact grants, generations, reconciliation, provenance, and
-revocation have a language-neutral local control contract and acceptance tests.
+N5 does not reinterpret invitation possession as identity or trust. It requires one exact confirmed, active, unexpired N4 provider-native credential reference to match exactly one Headscale registration carrying `ProviderAuthenticatedRegistration` association strength, then re-reads the exact provider node and recomputes its machine-key fingerprint. Generic `Partial` associations, caller-assembled raw evidence, hostname, IP, timing proximity, online state, labels, and list cardinality remain non-authorizing.
+
+Every confirmed logical device starts untrusted. A persisted one-time authorization action binds activate/revoke capability to exact authority generation, device, network, expected trust state/revision, principal, and a five-minute maximum lifetime. SQLite consumes it atomically with an append-only decision. Revocation is terminal in N5. Trust evaluates false whenever the exact provider binding is not active, even if historical logical trust state was trusted.
+
+A raw machine key is never persisted by N5; only its canonical fingerprint is stored. Trust decisions contain bounded reason codes and safe correlation digests, not arbitrary text. Independent SQLite connections race durable revisions and uniqueness constraints rather than process locks. Full details are in [device-trust.md](device-trust.md).
+
+## Out of scope after N5
+
+N5 does not claim Keryx identity, transport authority, or Hermes Fleet authority. Keryx binding remains blocked until authenticated runtime provenance is supplied and owner-accepted. Fleet projection remains blocked until managed enrollment, exact grants, generations, reconciliation, provenance, and revocation have a language-neutral local control contract and acceptance tests.

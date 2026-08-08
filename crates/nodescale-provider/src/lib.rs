@@ -186,7 +186,11 @@ pub struct ProviderUserObservation {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreAuthAssociationStrength {
+    /// A correlation hint only; never sufficient for N5 identity confirmation.
     Partial,
+    /// The authenticated provider registration record itself names the exact
+    /// provider-native credential used for that registration.
+    ProviderAuthenticatedRegistration,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

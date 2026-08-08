@@ -1,0 +1,21 @@
+[package]
+name = "nodescale-device-trust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+nodescale-domain = { path = "../nodescale-domain" }
+nodescale-provider = { path = "../nodescale-provider" }
+nodescale-state = { path = "../nodescale-state" }
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+nodescale-invitation = { path = "../nodescale-invitation" }
+nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }
+nodescale-redemption-ingress = { path = "../nodescale-redemption-ingress" }
+tempfile = "3"
+tokio.workspace = true
+zeroize.workspace = true

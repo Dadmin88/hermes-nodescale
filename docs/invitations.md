@@ -110,12 +110,18 @@ the exact durable pre-auth credential ID. After client stop, the exact credentia
 is revoked and exact node deleted. Zero nodes, proof resources, listeners,
 runtime roots, secrets, and host-network changes may remain.
 
-## Deferred after N4B
+## N5 continuation boundary
+
+N5 consumes the exact N4 join-session/provider-reference association only after authoritative Headscale registration appears. It creates one Nodescale-generated logical device ID, persists a separate machine-key-fingerprinted provider binding, and leaves the device untrusted. Trust activation and revocation are separate typed owner-authorized operations; invitation roles, including `admin`, confer no trust authority. See [device-trust.md](device-trust.md).
+
+The retained N5 proof extends the same isolated join and exact cleanup path. It proves identity confirmation, pre-trust false, explicit activation true, explicit revocation false, stale binding after exact provider cleanup, zero final trusted devices, and zero Keryx/Fleet/Hermes activation.
+
+## Deferred after N5
 
 The following remain blocked on separate owner authorization and acceptance criteria:
 
-- correlating the joined provider node to authenticated agent identity;
-- activating a trusted Nodescale device;
-- creating a Keryx binding from authenticated runtime provenance;
+- authenticating and binding a Keryx runtime identity to the trusted logical device;
+- consuming N5 trust in Keryx transport authorization;
 - projecting managed enrollment or grants into Hermes Fleet;
-- operator invitation issuance, CLI, and web-console surfaces.
+- agent-profile provisioning, scheduling, or Hermes execution;
+- operator invitation/trust CLI and web-console surfaces.

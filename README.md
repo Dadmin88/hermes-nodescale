@@ -1,10 +1,10 @@
 # Nodescale
 
-Nodescale is a small private-device membership and identity control plane for Hermes Fleet. This repository contains the accepted N0C Rust foundation, the N1A/N2A read-only Headscale import and reconciliation path, the N3A capability-separated Headscale mutation provider, the N4A invitation/join-session service, and the N4B bounded redemption ingress.
+Nodescale is a small private-device membership and identity control plane for Hermes Fleet. This repository contains the accepted N0C Rust foundation, the N1A/N2A read-only Headscale import and reconciliation path, the N3A capability-separated Headscale mutation provider, the N4A invitation/join-session service, the N4B bounded redemption ingress, and the N5 authoritative device-identity/trust lifecycle.
 
 ## Status
 
-N2A can import explicit read-only Headscale configuration, perform discovery, persist normalized provider observations, reconcile drift and conflicts, and expose sanitized doctor inventory. N3A adds separately configured, state-authorized provider mutation primitives for the exact clean Headscale v0.29.3 pin. N4A adds opaque single-use invitations, durable join sessions, and exactly-once coupling to bounded provider credentials. N4B adds a single verified-TLS redemption route plus an exact-tree disposable Tailscale/Headscale acceptance harness. A completed join claim requires the harness's external evidence manifest for the exact candidate tree; source presence alone is not execution evidence. N4B does **not** deploy production Headscale, bind Keryx identities, activate trusted membership, or project trust into Hermes Fleet.
+N2A can import explicit read-only Headscale configuration, perform discovery, persist normalized provider observations, reconcile drift and conflicts, and expose sanitized doctor inventory. N3A adds separately configured, state-authorized provider mutation primitives for the exact clean Headscale v0.29.3 pin. N4A adds opaque single-use invitations, durable join sessions, and exactly-once coupling to bounded provider credentials. N4B adds a single verified-TLS redemption route plus an exact-tree disposable Tailscale/Headscale acceptance harness. N5 adds a Nodescale-generated logical device ID, exact join-session/provider-registration binding, explicit owner-authorized trust activation/revocation, append-only trust history, and a typed internal trust query. Completed N4B/N5 join claims require external evidence for the exact candidate tree; source presence alone is not execution evidence. N5 does **not** deploy production Headscale, bind Keryx identities, enroll Fleet, issue Fleet grants, or activate Hermes.
 
 **A Headscale node appearing in Nodescale discovery does not make it a trusted Hermes Fleet node.**
 
@@ -12,7 +12,7 @@ N2A can import explicit read-only Headscale configuration, perform discovery, pe
 - Planned future Hermes Fleet implementation: Rust.
 - Both are the same product: **Hermes Fleet**.
 
-Trusted activation remains gated on authenticated Keryx sender provenance and a stable Hermes Fleet managed-state contract with acceptance tests.
+Nodescale trust activation is implemented in N5 and remains separate from provider membership. Keryx binding and Hermes Fleet authority remain gated on authenticated runtime provenance and later acceptance contracts.
 
 ## N3A mutation boundary
 
@@ -85,6 +85,14 @@ the exact credential is revoked through `InvitationService`, the exact node is
 deleted. Acceptance requires exact-tree evidence of zero runtime residue, unchanged
 repository and host-network invariants, and separately reported retained image cache.
 
+## N5 authoritative identity and trust boundary
+
+N5 confirms a logical Nodescale device only when one exact confirmed N4 provider-native credential reference matches one authoritative, non-expired Headscale pre-auth association and its machine-key evidence matches the canonical fingerprint. Nodescale generates the immutable UUID `DeviceId`; hostname, IP, timing, provider numeric ID, and labels are never identity selectors. Logical devices and provider bindings are separate records and lifetimes.
+
+Every confirmed device starts untrusted. Owner-controlled configuration and one-time typed authorization actions gate exact-device activation and revocation. Trust decisions are append-only, revisioned, capability-specific, and bounded to normalized principal provenance. Revocation is terminal in N5. The internal query reports both logical trust and provider-binding state and returns current trust only when state is trusted and the exact binding is active. See [`docs/device-trust.md`](docs/device-trust.md).
+
+N5 deliberately creates no Keryx binding, Fleet enrollment/grant, Hermes activation, runtime profile, scheduler, or public trust endpoint.
+
 ## Workspace
 
 - `crates/nodescale-domain` — typed identities, models, generations, secret wrappers, and pure state machines.
@@ -94,6 +102,7 @@ repository and host-network invariants, and separately reported retained image c
 - `crates/nodescale-provider-headscale` — real HTTPS Headscale v0.29.3 inspection and explicitly authorized mutation adapters.
 - `crates/nodescale-invitation` — opaque invitation issuance, durable redemption, one-time provider-credential delivery, and conservative cleanup orchestration.
 - `crates/nodescale-redemption-ingress` — bounded verified-TLS capability redemption routed through `InvitationService`.
+- `crates/nodescale-device-trust` — exact provider-registration correlation, logical device confirmation, typed trust activation/revocation, and authoritative internal trust query.
 
 ## Development
 
@@ -104,7 +113,7 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/invitations.md`](docs/invitations.md), [`docs/discovery-reconciliation.md`](docs/discovery-reconciliation.md), [`docs/headscale-compatibility.md`](docs/headscale-compatibility.md), [`docs/threat-model.md`](docs/threat-model.md), and [`docs/development.md`](docs/development.md).
+See [`docs/architecture.md`](docs/architecture.md), [`docs/device-trust.md`](docs/device-trust.md), [`docs/invitations.md`](docs/invitations.md), [`docs/discovery-reconciliation.md`](docs/discovery-reconciliation.md), [`docs/headscale-compatibility.md`](docs/headscale-compatibility.md), [`docs/threat-model.md`](docs/threat-model.md), and [`docs/development.md`](docs/development.md).
 
 ## License
 

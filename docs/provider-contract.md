@@ -79,6 +79,6 @@ The Headscale client verifies TLS by default, requires a clean HTTPS origin, dis
 
 ## Identity and trust
 
-Provider observations are evidence, not trusted membership. A normalized Headscale node cannot activate a Nodescale device, verify a Keryx binding, derive exact Hermes Fleet grants, or promote provider role/tag metadata into authorization. Pre-auth-key association is partial correlation evidence only.
+Provider observations are evidence, not trusted membership. Generic pre-auth association remains partial, non-authorizing correlation evidence. The authenticated Headscale node record's exact credential-ID linkage is separately classified as `ProviderAuthenticatedRegistration`; N5 may use it only with exact active N4 provenance, exact provider re-read, and machine-key fingerprint verification to create an initially untrusted logical device. No provider observation can activate a Nodescale device, verify a Keryx binding, derive exact Hermes Fleet grants, or promote provider role/tag metadata into authorization.
 
 The deterministic fake provider remains test infrastructure. Its legacy `Provider` implementation preserves mutable N0C simulation, while its async `ReadOnlyProvider` projection advertises only read capabilities, always denies mutation, and mirrors the real adapter's healthy/degraded/authentication/unreachable semantics.
