@@ -82,4 +82,6 @@ Start with the [documentation index](docs/README.md), then use the focused refer
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Current versions of Nodescale are licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See [LICENSE](LICENSE).
+
+Code published in earlier commits under Apache-2.0 remains available under the license terms that applied when it was published.
