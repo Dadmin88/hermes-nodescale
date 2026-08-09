@@ -8,6 +8,10 @@ members = [
   "crates/nodescale-provider-headscale",
   "crates/nodescale-invitation",
   "crates/nodescale-redemption-ingress",
+  "crates/nodescale-binding",
+  "crates/nodescale-keryx-adapter",
+  "crates/nodescale-fleet-client",
+  "crates/nodescale-projection",
 ]
 resolver = "2"
 
@@ -19,12 +23,15 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/Dadmin88/nodescale"
 
 [workspace.dependencies]
+anyhow = "1"
 argon2 = "0.5"
 async-trait = "0.1"
 axum = { version = "0.8.7", features = ["json"] }
 axum-server = { version = "0.7.3", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+keryx-proto = { git = "https://github.com/Dadmin88/hermes-keryx", rev = "8fe1769612d701e7509644ac7c9ebb3b8c24fcb1" }
+keryx-relay = { git = "https://github.com/Dadmin88/hermes-keryx", rev = "8fe1769612d701e7509644ac7c9ebb3b8c24fcb1" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rcgen = "0.13"
@@ -35,6 +42,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tonic = "0.14"
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1.9"
 x509-parser = "0.17"

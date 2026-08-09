@@ -132,13 +132,17 @@ Provider admission, invitation possession, and generic partial pre-auth associat
 
 A one-time local-owner bootstrap returns an opaque `nstrust_` 256-bit capability and persists only its fixed-profile Argon2id verifier. That active root gates sealed trust-authority configuration, one-shot revision-fenced action issuance, authority/root revocation, and append-only decisions. Root revocation disables linked authorities and invalidates unconsumed actions. Effective trust requires both logical trusted state and an active exact binding. Provider-backed reconciliation marks authoritative absence, expiry, credential drift, or machine-key drift stale; transient errors return no trusted result. Cleanup proceeds through revisioned `stale`, `cleanup_pending`, and `removed` states.
 
-N5 still creates no authenticated Keryx identity, Fleet enrollment/grant, Hermes activation, scheduler, workload placement, or runtime profile. See [Device Identity and Trust](device-trust.md).
+N5 itself creates no authenticated Keryx identity, Fleet enrollment/grant, Hermes activation, scheduler, workload placement, or runtime profile. See [Device Identity and Trust](device-trust.md).
+
+## N6 authenticated Keryx binding
+
+N6 introduces a durable authenticated Keryx-binding boundary between the existing Nodescale device identity and Keryx transport provenance. Provider-fresh challenge issuance and confirmation bind only the authenticated peer, with durable replay recovery, rotation, revocation, generation, and revision fences. This does not establish Hermes Fleet enrollment or grants, Hermes activation, scheduling, workload placement, or a runtime profile. Those remain distinct transitions governed by their own generations and policies. See the [N6 authenticated Keryx-binding contract](n6-authenticated-keryx-binding.md).
 
 ## Trusted activation beyond N5
 
 Provider admission alone cannot establish Keryx or Hermes Fleet authority. Those later transitions require authenticated Keryx provenance and successful Hermes Fleet projection according to their own generations and policies.
 
-The current repository implements N5 Nodescale identity/trust but does not complete Keryx binding or Hermes Fleet projection.
+The repository implements N5 Nodescale identity/trust and N6 authenticated Keryx identity binding. N6 does not complete Hermes Fleet projection or make a Keryx binding equivalent to application activation.
 
 ## Deliberate non-goals
 

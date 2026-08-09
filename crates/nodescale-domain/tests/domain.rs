@@ -98,30 +98,36 @@ fn join_session_transitions_follow_approved_sequence() {
 }
 
 #[test]
-fn verified_keryx_binding_cannot_be_fabricated_by_deserialization() {
-    let payload = serde_json::json!({
-        "binding_id": KeryxBindingId::new(),
-        "device_id": DeviceId::new(),
-        "network_id": NetworkId::new(),
-        "verified_peer_id": "self-reported-peer",
-        "generation": 1,
-        "state": "Verified",
-        "verified_at": Utc::now(),
-        "rotation": null
-    });
-    assert!(serde_json::from_value::<KeryxBindingIdentity>(payload).is_err());
+fn keryx_binding_identity_is_a_one_way_public_response() {
+    let identity = KeryxBindingIdentity::pending(
+        KeryxBindingId::new(),
+        NetworkId::new(),
+        DeviceId::new(),
+        JoinSessionId::new(),
+        Generation::initial(),
+        1,
+        Utc::now(),
+        AgentVersion::parse("nodescale-agent:6").unwrap(),
+    )
+    .unwrap();
+
+    let serialized = serde_json::to_value(&identity).unwrap();
+    assert_eq!(serialized["state"], "pending");
+    assert!(serialized["verified_peer_id"].is_null());
+    // There is deliberately no `Deserialize` assertion: persisted binding
+    // identity is state-store-owned and not a public request contract.
 }
 
 #[test]
 fn binding_revocation_and_projection_transitions_are_explicit() {
     assert!(
         KeryxBindingState::Pending
-            .transition(KeryxBindingState::Verified)
+            .transition(KeryxBindingState::Active)
             .is_ok()
     );
     assert!(
-        KeryxBindingState::Disabled
-            .transition(KeryxBindingState::Verified)
+        KeryxBindingState::Revoked
+            .transition(KeryxBindingState::Active)
             .is_err()
     );
     assert!(
@@ -137,7 +143,7 @@ fn binding_revocation_and_projection_transitions_are_explicit() {
     assert!(
         ProjectionStatus::Applied
             .transition(ProjectionStatus::Pending)
-            .is_err()
+            .is_ok()
     );
 }
 

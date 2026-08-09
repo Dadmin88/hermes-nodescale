@@ -11,8 +11,8 @@ const MIGRATIONS: [&str; 4] = [
 #[test]
 fn fresh_schema_has_n5_tables_and_no_implicit_trust() {
     let store = StateStore::open_in_memory().unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 5);
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 7);
+    assert_eq!(store.schema_version().unwrap(), 7);
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("fresh.db");
@@ -47,7 +47,7 @@ fn fresh_schema_has_n5_tables_and_no_implicit_trust() {
 }
 
 #[test]
-fn every_supported_predecessor_upgrades_to_v5_atomically() {
+fn every_supported_predecessor_upgrades_to_v7_atomically() {
     for predecessor in 1_u32..=4 {
         let directory = tempdir().unwrap();
         let path = directory.path().join(format!("v{predecessor}.db"));
@@ -61,7 +61,7 @@ fn every_supported_predecessor_upgrades_to_v5_atomically() {
         drop(connection);
 
         let store = StateStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
         drop(store);
 
         let connection = rusqlite::Connection::open(path).unwrap();

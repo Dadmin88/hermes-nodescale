@@ -12,12 +12,12 @@
 Run the full local validation set from the repository root:
 
 ```bash
-cargo metadata --no-deps --format-version 1
+cargo metadata --locked --no-deps --format-version 1
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test -p nodescale-state --test state
-cargo build --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo test -p nodescale-state --test state --locked
+cargo build --workspace --locked
 git diff --check
 TREE="$(git write-tree)"
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_public_hygiene.py --repo "$(pwd)" --tree "$TREE"

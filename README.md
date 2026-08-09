@@ -41,9 +41,10 @@ The repository currently includes:
 - deterministic fake-provider and loopback test infrastructure;
 - Nodescale-generated immutable `DeviceId` confirmation from exact N4/provider registration evidence;
 - explicit owner-root-gated logical trust activation/revocation and provider-binding cleanup/reconciliation;
+- durable authenticated Keryx identity binding with provider-fresh challenges, replay-safe confirmation, rotation, revocation, and exact-tree acceptance tooling;
 - disposable Headscale/Tailscale acceptance tooling for provider join plus N5 identity/trust verification.
 
-N5 implements explicit Nodescale logical trust without making provider membership equivalent to trust. This is not live/application activation: authenticated Keryx binding and managed Hermes Fleet projection remain separate, unimplemented integration boundaries.
+N5 implements explicit Nodescale logical trust without making provider membership equivalent to trust. N6 binds that trust to authenticated Keryx transport identity without granting Hermes Fleet authority. Managed Hermes Fleet projection remains a separate integration boundary, and neither provider membership nor a Keryx binding is application activation. See the [N6 authenticated Keryx-binding contract](docs/n6-authenticated-keryx-binding.md).
 
 ## Workspace
 
@@ -57,6 +58,8 @@ N5 implements explicit Nodescale logical trust without making provider membershi
 | `nodescale-invitation` | Invitation issuance, durable redemption, one-time provider-credential delivery, and cleanup orchestration. |
 | `nodescale-redemption-ingress` | Bounded verified-TLS invitation redemption transport around `InvitationService`. |
 | `nodescale-device-trust` | State-owned exact provider-registration correlation, explicit owner-authorized Nodescale trust, binding reconciliation, and typed trust queries. |
+| `nodescale-keryx-adapter` | Authenticated Keryx control-frame parsing and secret-minimizing transport response mapping. |
+| `nodescale-binding` | Production N6 provider-fresh challenge, durable binding, authorization, rotation, revocation, and actor lifecycle orchestration. |
 
 ## Development
 

@@ -1,0 +1,37 @@
+[package]
+name = "nodescale-binding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+nodescale-keryx-adapter = { path = "../nodescale-keryx-adapter" }
+nodescale-domain = { path = "../nodescale-domain" }
+nodescale-state = { path = "../nodescale-state" }
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+chrono.workspace = true
+keryx-proto.workspace = true
+keryx-relay.workspace = true
+nodescale-provider = { path = "../nodescale-provider" }
+nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }
+rcgen.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic.workspace = true
+
+[lints]
+workspace = true
