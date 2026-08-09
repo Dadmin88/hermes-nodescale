@@ -169,6 +169,39 @@ fn audit_metadata_rejects_secret_bearing_keys() {
 }
 
 #[test]
+fn audit_metadata_rejects_n6_secret_values_under_safe_keys_at_any_depth() {
+    const NONCE: &str = "nsbind_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const VERIFIER: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdC1uNi1maXhlZC0xNg$MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXY";
+
+    for value in [
+        serde_json::json!({"correlation": NONCE}),
+        serde_json::json!({"public_context": {"items": [VERIFIER]}}),
+        serde_json::from_str(&format!(r#"{{"{NONCE}":"public"}}"#)).unwrap(),
+        serde_json::from_str(&format!(r#"{{"{VERIFIER}":"public"}}"#)).unwrap(),
+        serde_json::from_str(
+            r#"{"escaped":"nsbind_\u0041AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        )
+        .unwrap(),
+        serde_json::from_str(
+            r#"{"nsbind_\u0041AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA":"public"}"#,
+        )
+        .unwrap(),
+    ] {
+        assert!(matches!(
+            SanitizedMetadata::new(value),
+            Err(StateError::UnsafeAuditMetadata(_))
+        ));
+    }
+
+    assert!(
+        SanitizedMetadata::new(serde_json::json!({
+            "reason": "nonce rotation and verifier policy were reviewed"
+        }))
+        .is_ok()
+    );
+}
+
+#[test]
 fn invitation_plaintext_never_persists_or_reaches_audit() {
     let store = StateStore::open_in_memory().unwrap();
     let network = sample_network();

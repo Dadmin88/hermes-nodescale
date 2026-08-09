@@ -1,0 +1,23 @@
+[package]
+name = "nodescale-keryx-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+keryx-proto.workspace = true
+keryx-relay.workspace = true
+nodescale-domain = { path = "../nodescale-domain" }
+thiserror.workspace = true
+tonic.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

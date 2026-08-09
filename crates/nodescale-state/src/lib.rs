@@ -25,10 +25,12 @@ use thiserror::Error;
 
 mod n5;
 pub use n5::*;
+mod n6;
+pub use n6::*;
 #[cfg(test)]
 mod n5_identity_trust_tests;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 const MUTATION_AUTHORIZATION_MIGRATION: &str =
@@ -36,6 +38,8 @@ const MUTATION_AUTHORIZATION_MIGRATION: &str =
 const INVITATION_LIFECYCLE_MIGRATION: &str =
     include_str!("../migrations/0004_invitation_lifecycle.sql");
 const DEVICE_TRUST_MIGRATION: &str = include_str!("../migrations/0005_device_trust.sql");
+const KERYX_IDENTITY_BINDING_MIGRATION: &str =
+    include_str!("../migrations/0006_keryx_identity_binding.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -722,6 +726,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
+                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -739,6 +744,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
+                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -755,6 +761,7 @@ impl StateStore {
                 .execute_batch(MUTATION_AUTHORIZATION_MIGRATION)
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
+                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -770,6 +777,7 @@ impl StateStore {
             let migration_result = connection
                 .execute_batch(INVITATION_LIFECYCLE_MIGRATION)
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
+                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -782,12 +790,26 @@ impl StateStore {
             }
         } else if found == 4 {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result =
-                connection
-                    .execute_batch(DEVICE_TRUST_MIGRATION)
-                    .and_then(|()| {
-                        connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                    });
+            let migration_result = connection
+                .execute_batch(DEVICE_TRUST_MIGRATION)
+                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 5 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result = connection
+                .execute_batch(KERYX_IDENTITY_BINDING_MIGRATION)
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
             match migration_result {
                 Ok(()) => connection.execute_batch("COMMIT;")?,
                 Err(error) => {
@@ -2568,6 +2590,9 @@ fn validate_metadata(value: &Value) -> Result<(), StateError> {
                 if BANNED_KEYS.iter().any(|banned| normalized.contains(banned)) {
                     return Err(StateError::UnsafeAuditMetadata(key.clone()));
                 }
+                if n6_audit_secret_value(key) {
+                    return Err(StateError::UnsafeAuditMetadata("N6 secret key".into()));
+                }
                 validate_metadata(nested)?;
             }
         }
@@ -2576,10 +2601,52 @@ fn validate_metadata(value: &Value) -> Result<(), StateError> {
                 validate_metadata(nested)?;
             }
         }
-        Value::String(value) if value.len() > 1024 => {
-            return Err(StateError::UnsafeAuditMetadata("oversized string".into()));
+        Value::String(value) => {
+            if value.len() > 1024 {
+                return Err(StateError::UnsafeAuditMetadata("oversized string".into()));
+            }
+            if n6_audit_secret_value(value) {
+                return Err(StateError::UnsafeAuditMetadata("N6 secret value".into()));
+            }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn n6_audit_secret_value(value: &str) -> bool {
+    const BINDING_NONCE_PREFIX: &str = "nsbind_";
+    const BINDING_NONCE_ENCODED_LEN: usize = 43;
+    const N6_VERIFIER_PREFIX: &str = "$argon2id$v=19$m=19456,t=2,p=1$";
+
+    let canonical_nonce = value
+        .strip_prefix(BINDING_NONCE_PREFIX)
+        .is_some_and(|encoded| {
+            encoded.len() == BINDING_NONCE_ENCODED_LEN
+                && encoded
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                && encoded.as_bytes().last().is_some_and(|byte| {
+                    matches!(
+                        byte,
+                        b'A' | b'E'
+                            | b'I'
+                            | b'M'
+                            | b'Q'
+                            | b'U'
+                            | b'Y'
+                            | b'c'
+                            | b'g'
+                            | b'k'
+                            | b'o'
+                            | b's'
+                            | b'w'
+                            | b'0'
+                            | b'4'
+                            | b'8'
+                    )
+                })
+        });
+
+    canonical_nonce || value.starts_with(N6_VERIFIER_PREFIX)
 }

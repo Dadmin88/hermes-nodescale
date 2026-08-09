@@ -1177,7 +1177,7 @@ fn validate_n5_audit_actor(actor: &AuditActor) -> Result<(), StateError> {
     }
 }
 
-fn verify_n5_owner_root(
+pub(super) fn verify_n5_owner_root(
     tx: &Transaction<'_>,
     token: &OwnerTrustRootToken,
     network_id: NetworkId,
