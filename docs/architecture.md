@@ -1,156 +1,260 @@
-# Architecture
+# Nodescale Architecture
 
-Nodescale is a control plane for managed device membership and identity. It intentionally separates mesh admission, Nodescale-owned identity, authenticated transport identity, and Hermes Fleet authorization.
+Nodescale is the device membership and trust control plane for Hermes Fleet.
 
-## System boundaries
+The easiest way to understand it is to separate four questions:
+
+```text
+Headscale / Tailscale: Is this device on the private network?
+Nodescale:             What device is this, and do we trust it?
+Keryx:                 Which application peer is actually speaking?
+Hermes Fleet:          What is this device allowed to do?
+```
+
+A "yes" at one layer does not automatically mean "yes" at the next layer.
+
+## What Nodescale owns
 
 Nodescale owns:
 
-- managed network and device membership;
-- Nodescale device identity and credential generations;
-- roles and lifecycle state;
-- provider observations and reconciliation state;
+- managed network membership records;
+- stable Nodescale `DeviceId` values;
 - invitation and join-session state;
-- desired Hermes Fleet enrollment and grant intent.
+- provider observations and reconciliation;
+- explicit device trust;
+- Keryx identity-binding records;
+- membership, binding, and projection generations;
+- desired Hermes Fleet managed state;
+- revocation and audit history.
 
-Adjacent systems retain their own authority:
+Nodescale does not own Keryx transport state or Fleet scheduling state.
 
-- **Mesh providers** own mesh admission, reachability, provider-local node identity, tags, and network policy.
-- **Keryx** owns authenticated application-transport peer identity and runtime provenance.
-- **Hermes Fleet** owns final application authorization, scheduling, local overrides, and execution.
+## What adjacent systems own
 
-A mesh node is therefore never equivalent to a trusted Hermes Fleet node.
+### Mesh provider
 
-## Workspace structure
+The mesh provider, currently Headscale with standard Tailscale clients, owns:
 
-The Rust workspace separates policy and state boundaries so that no adapter can silently acquire broader authority:
+- network admission;
+- reachability;
+- provider-local node identity;
+- tags and provider policy;
+- mesh addresses.
 
-- `nodescale-domain` contains pure typed domain models and state machines.
-- `nodescale-state` owns the Nodescale SQLite database, migrations, persisted observations, mutation authorization state, lifecycle state, and audit records.
-- `nodescale-provider` defines provider-neutral read and mutation contracts.
-- `nodescale-provider-fake` provides deterministic test behavior.
-- `nodescale-provider-headscale` implements Headscale discovery and explicitly authorized provider mutations.
-- `nodescale-invitation` owns invitation and join-session lifecycle behavior.
-- `nodescale-redemption-ingress` exposes the network transport for invitation redemption and delegates lifecycle decisions to `InvitationService`.
+A Headscale node is not automatically a trusted Nodescale device.
 
-State code does not read provider, Keryx, or Hermes Fleet databases. Provider payloads are normalized before they can enter Nodescale state.
+### Keryx
 
-## Identity separation
+Keryx owns authenticated application peer identity and transport provenance.
 
-Nodescale preserves three non-substitutable identities:
+Nodescale may bind a trusted `DeviceId` to an authenticated Keryx peer, but it never trusts a peer ID supplied by ordinary request JSON.
 
-1. provider device identity;
-2. Nodescale managed-device identity;
-3. authenticated Keryx peer identity.
+### Hermes Fleet
 
-Hostnames, display names, mesh addresses, tags, and caller-supplied peer identifiers are observations only. A durable binding may relate authoritative identities, but one identity never substitutes for another.
+Fleet owns final application authority and coordination:
 
-See [Identity Model](identity-model.md).
+- local deny rules;
+- allowed Fleet operations;
+- readiness;
+- future capacity and scheduling;
+- Hermes execution authority.
+
+Nodescale can project safe managed state into Fleet, but Fleet remains authoritative for what it actually stores and allows.
+
+## Identity layers
+
+Nodescale keeps three identities separate:
+
+1. **Provider identity**: the device as the mesh provider knows it.
+2. **Nodescale DeviceId**: the stable logical identity Nodescale creates.
+3. **Keryx peer identity**: the authenticated application/runtime identity.
+
+Hostnames, display names, IP addresses, tags, and caller-supplied peer IDs are observations. They are not substitutes for authoritative identity.
+
+## Device lifecycle in plain English
+
+The normal path is:
+
+```text
+invitation created
+        ↓
+device joins provider network
+        ↓
+Nodescale correlates the exact provider device
+        ↓
+Nodescale creates a DeviceId
+        ↓
+owner explicitly trusts the device
+        ↓
+Keryx proves the application peer identity
+        ↓
+Nodescale projects managed state into Fleet
+```
+
+Each step is durable and has its own generation or revision rules where needed.
 
 ## Provider discovery and reconciliation
 
-An existing Headscale network can be imported using explicit configuration. Discovery reads provider state, validates the configured provider instance and compatibility, normalizes node observations, and stores them separately from trusted Nodescale devices.
+Nodescale does not trust provider data blindly.
 
-Reconciliation is deterministic and fail-closed:
+A reconciliation cycle roughly does this:
 
-1. load the persisted provider configuration;
-2. inspect provider health, version, and identity;
-3. read and normalize the complete provider snapshot;
-4. reject duplicate or conflicting canonical identities;
-5. compare the snapshot with persisted observations;
-6. classify changes and conflicts;
-7. atomically persist observation, freshness, and audit updates;
-8. return a sanitized diagnostic report.
+1. load the configured provider instance;
+2. verify compatibility and health;
+3. read the provider's current node view;
+4. normalize provider-specific data;
+5. reject conflicting canonical identities;
+6. compare observations with durable Nodescale state;
+7. classify changes, absence, expiry, or conflicts;
+8. persist the new observation and audit information.
 
-Provider outages preserve the last successful inventory. They are not interpreted as mass deletion.
-
-See [Discovery and Reconciliation](discovery-reconciliation.md).
+A provider outage is not treated as "all nodes were deleted." Nodescale keeps the last known state and fails closed where current evidence is required.
 
 ## Provider mutation boundary
 
-Provider reads and writes use separate interfaces. Read-only imports cannot acquire mutation authority from server capabilities, roles, tags, or compatibility alone.
+Provider reads and provider writes are separate capabilities.
 
-Mutation requires all of the following:
+A mutation requires explicit Nodescale authority for that exact kind of operation. Examples include:
 
-- an exact configured network and provider instance;
-- compatible runtime evidence;
-- explicit mutation-enabled state;
-- an operation-specific capability;
-- a state-issued authorization consumed by the mutation call.
+- create a bounded join credential;
+- invalidate that credential;
+- update the exact node's tags;
+- expire or delete one exact node;
+- update provider policy when the configured mode supports it.
 
-Supported mutation capabilities are deliberately narrow: principal creation, bounded join-credential creation and invalidation, exact-node tag replacement, expiry, deletion, and policy management in explicitly verified database mode.
+A network response does not automatically prove that a provider mutation succeeded. Nodescale uses authoritative read-back when the provider supports it and preserves uncertainty when it cannot prove the final state.
 
-The provider contract does not assume compare-and-swap support. A transport acknowledgement alone is not proof of success. Rejected, unsupported, and ambiguous outcomes remain distinct, and authoritative read-back is required where the provider exposes one.
+## Invitations and join sessions
 
-See [Provider Contract](provider-contract.md).
+An invitation contains an opaque selector and random secret.
 
-## Invitation and redemption flow
+Nodescale stores a verifier rather than keeping the plaintext secret in normal durable state.
 
-An invitation contains an opaque selector and a random secret. Nodescale stores only a verifier and safe metadata. Successful presentation atomically reserves the invitation and creates a durable join session before a provider credential request is dispatched.
+A successful redemption creates a durable join session before one-time provider bootstrap material is delivered.
 
-The provider credential is bounded to the configured principal, expiry, use count, and approved tags. Its plaintext is delivery-only and is not written to SQLite, audit metadata, or normal diagnostics.
+The join credential is deliberately bounded by properties such as expiry, use count, principal, and approved tags.
 
-The redemption ingress exposes one verified-TLS endpoint:
+Receiving join material proves only that the device may attempt to join. It does not prove trust or Fleet authorization.
+
+## N5: device identity and explicit trust
+
+N5 creates the stable logical `DeviceId` and separates identity from trust.
+
+The important sequence is:
 
 ```text
-POST /v1/redemptions
+exact provider evidence
+→ DeviceId created
+→ device starts untrusted
+→ owner explicitly authorizes trust
 ```
 
-The request body contains only the invitation token. Source and global admission controls execute before expensive verification or provider work. A bounded worker owns the non-thread-safe state and invitation service, while SQLite remains authoritative for replay protection across independent processes.
+Effective trust is provider-fresh. Durable state can remember that a device was logically trusted, but an affirmative "trusted right now" answer requires current provider evidence.
 
-A successful response returns only bootstrap material required by the provider client. It does not return Nodescale trust claims.
+This prevents an old database snapshot from being treated as fresh proof that the provider binding still exists and still matches.
 
-See [Invitations and Redemption](invitations.md).
+See [Device identity and trust](device-trust.md).
 
-## Generations and reconciliation
+## N6: authenticated Keryx identity binding
 
-Nodescale persists independent monotonic generations for membership, device credentials, Keryx bindings, and Fleet projection. Stale writers are rejected.
+N6 binds a trusted Nodescale `DeviceId` to an authenticated Keryx peer.
 
-Exact replay may be idempotent only when the generation and content identity both match. Reusing a generation with different content is a conflict.
+The key rule is:
 
-Desired Hermes Fleet state is persisted before submission. Applied state must be read back through the Fleet integration boundary before projection is considered complete.
+> The authoritative Keryx peer comes from Keryx authentication context, not from a peer ID supplied by the caller.
+
+Binding uses one-time challenge material, durable replay handling, exact generations, rotation, revocation, and provider-fresh checks.
+
+N6 still does not grant Hermes Fleet execution authority.
+
+See [N6 authenticated Keryx binding](n6-authenticated-keryx-binding.md).
+
+## N7: managed Hermes Fleet projection
+
+N7 connects Nodescale's trusted identity model to Hermes Fleet.
+
+Nodescale persists the desired Fleet projection, sends it through the typed Fleet client, and then inspects Fleet's authoritative stored state.
+
+```text
+trusted DeviceId
++ active Keryx binding
+        ↓
+Nodescale desired projection
+        ↓
+Fleet managed-projection service
+        ↓
+Fleet-owned durable state
+        ↓
+Nodescale authoritative inspection
+```
+
+Important rules:
+
+- projection generation advances independently from membership and Keryx binding generations;
+- exact replay may be idempotent;
+- stale, conflicting, skipped, or regressed generations fail closed;
+- response loss is recovered by inspection before reapplying blindly;
+- local Fleet deny remains authoritative;
+- generated Fleet authority is limited to the accepted baseline operations;
+- no N7 projection automatically grants `fleet.hermes.run`.
+
+See [N7 authenticated Fleet projection](n7-authenticated-fleet-projection.md).
+
+## Generations
+
+Different parts of the system change independently, so Nodescale does not use one giant version number.
+
+Examples include:
+
+- membership generation;
+- device credential generation;
+- Keryx binding generation;
+- Fleet projection generation.
+
+Older generations cannot silently overwrite newer state. Reusing the same generation with different content is a conflict.
 
 ## Revocation
 
-Revocation removes application trust before relying on provider cleanup. The durable ordering is conceptually:
+Application authority is removed before relying on slower network cleanup.
+
+A simplified ordering is:
 
 ```text
 revocation requested
-  -> Fleet scheduling/grants disabled
-  -> managed enrollment disabled
-  -> Nodescale credential revoked
-  -> Keryx binding disabled or tombstoned
-  -> provider cleanup pending
-  -> revoked
+→ Fleet authority/scheduling removed or disabled
+→ Keryx binding disabled
+→ Nodescale device authority revoked
+→ provider cleanup
+→ durable revoked state retained
 ```
 
-Provider outages may delay mesh cleanup, but they must not preserve application authorization. Historical identity and audit evidence remain available for reconciliation and incident analysis.
+If the provider is temporarily unavailable, application trust should still fail closed.
 
-## N5 authoritative device identity and Nodescale trust
+Historical identity and audit records are kept for recovery and incident analysis.
 
-Provider admission, invitation possession, and generic partial pre-auth association are insufficient for identity or trust. N5's state-owned confirmation operation requires one exact active and unexpired N4 provider reference, one `ProviderAuthenticatedRegistration` observation, an exact provider-node re-read, and matching machine-key fingerprint. It then generates an opaque immutable `DeviceId` and creates a separate active provider binding; the device starts untrusted.
+## State ownership
 
-A one-time local-owner bootstrap returns an opaque `nstrust_` 256-bit capability and persists only its fixed-profile Argon2id verifier. That active root gates sealed trust-authority configuration, one-shot revision-fenced action issuance, authority/root revocation, and append-only decisions. Root revocation disables linked authorities and invalidates unconsumed actions. Effective trust requires both logical trusted state and an active exact binding. Provider-backed reconciliation marks authoritative absence, expiry, credential drift, or machine-key drift stale; transient errors return no trusted result. Cleanup proceeds through revisioned `stale`, `cleanup_pending`, and `removed` states.
+Nodescale owns its own SQLite database.
 
-N5 itself creates no authenticated Keryx identity, Fleet enrollment/grant, Hermes activation, scheduler, workload placement, or runtime profile. See [Device Identity and Trust](device-trust.md).
+It does not read or write:
 
-## N6 authenticated Keryx binding
+- Headscale's internal database;
+- Keryx's database;
+- Hermes Fleet's database.
 
-N6 introduces a durable authenticated Keryx-binding boundary between the existing Nodescale device identity and Keryx transport provenance. Provider-fresh challenge issuance and confirmation bind only the authenticated peer, with durable replay recovery, rotation, revocation, generation, and revision fences. This does not establish Hermes Fleet enrollment or grants, Hermes activation, scheduling, workload placement, or a runtime profile. Those remain distinct transitions governed by their own generations and policies. See the [N6 authenticated Keryx-binding contract](n6-authenticated-keryx-binding.md).
-
-## Trusted activation beyond N5
-
-Provider admission alone cannot establish Keryx or Hermes Fleet authority. Those later transitions require authenticated Keryx provenance and successful Hermes Fleet projection according to their own generations and policies.
-
-The repository implements N5 Nodescale identity/trust and N6 authenticated Keryx identity binding. N6 does not complete Hermes Fleet projection or make a Keryx binding equivalent to application activation.
+Integration happens through supported provider APIs, Keryx authenticated control surfaces, and the Fleet local-control contract.
 
 ## Deliberate non-goals
 
-The current architecture does not introduce:
+Nodescale does not currently try to provide:
 
 - distributed consensus;
-- a shared database between Nodescale and adjacent systems;
-- direct mutation of Hermes Fleet configuration files;
-- implicit authorization derived from provider tags or Nodescale roles;
-- trust based on hostname, mesh address, or caller-supplied peer identifiers;
-- a second invitation lifecycle inside the HTTP ingress layer.
+- workload scheduling;
+- GPU placement;
+- Hermes profile deployment;
+- direct Hermes execution;
+- a shared cross-product database;
+- trust based on hostname or mesh address;
+- protection from an attacker who already controls the trusted Nodescale process or can arbitrarily replace its database.
+
+Those boundaries keep the trust model understandable and stop network membership from turning into unlimited application authority.
