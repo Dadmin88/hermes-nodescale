@@ -114,6 +114,18 @@ shell, file, process, admin, enrollment, wildcard, role-implied, or
 remains authoritative and is never cleared by Nodescale input. Disable or
 remove operations materialize no generated grants.
 
+N6 binding rotation and revocation are ordered behind this authority boundary.
+Once a projection dispatch has been attempted, Nodescale must not rotate or
+revoke that exact binding until authoritative Fleet read-back proves either a
+terminal `remove` projection or a later applied projection backed by different
+binding provenance. A merely desired projection has made no external mutation
+and does not block N6 revocation. An attempted, conflicting, or applied active
+projection fails the N6 mutation closed. Operators therefore use this bounded
+sequence for a managed node: reconcile uncertain projection state, apply and
+inspect a grant-free `remove`, then rotate or revoke N6; after rotation, a new
+active projection may be created from the replacement binding. Fleet
+unavailability cannot be treated as successful deauthorization.
+
 ### Acceptance boundary
 
 The selected V1 is not accepted on source review or unit tests alone. Acceptance

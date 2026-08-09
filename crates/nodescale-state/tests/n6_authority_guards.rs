@@ -394,7 +394,7 @@ fn n6_rotation_and_revocation_recheck_authorization_expiry_at_consumption() {
 
 #[test]
 fn n6_rotation_and_revocation_fail_closed_after_a_durable_n7_dispatch_attempt() {
-    for observed_as_applied in [false, true] {
+    for observed_state in ["attempted", "applied", "conflict"] {
         for capability in [
             KeryxBindingAuthorizationCapability::Rotate,
             KeryxBindingAuthorizationCapability::Revoke,
@@ -402,8 +402,24 @@ fn n6_rotation_and_revocation_fail_closed_after_a_durable_n7_dispatch_attempt() 
             let fixture = fixture();
             let (submission, attempted_revision) =
                 record_n7_dispatch_attempt(&fixture, "n7-dispatch-before-n6-control");
-            if observed_as_applied {
-                assert_eq!(
+            let expected_state = match observed_state {
+                "attempted" => N7ProjectionState::Attempted,
+                "applied" => {
+                    fixture
+                        .store
+                        .recover_n7_projection_from_inspection(
+                            &submission.operation_id,
+                            DeviceId::parse(DEVICE).unwrap(),
+                            submission.generation,
+                            attempted_revision,
+                            N7AuthoritativeInspection::observed(submission.desired_body.clone())
+                                .unwrap(),
+                            now(),
+                        )
+                        .unwrap()
+                        .state
+                }
+                "conflict" => {
                     fixture
                         .store
                         .recover_n7_projection_from_inspection(
@@ -412,16 +428,23 @@ fn n6_rotation_and_revocation_fail_closed_after_a_durable_n7_dispatch_attempt() 
                             submission.generation,
                             attempted_revision,
                             N7AuthoritativeInspection::observed(
-                                br#"{"fleet":"desired","state":"active"}"#.to_vec(),
+                                br#"{"fleet":"different","state":"active"}"#.to_vec(),
                             )
                             .unwrap(),
                             now(),
                         )
                         .unwrap()
-                        .state,
-                    N7ProjectionState::Applied
-                );
-            }
+                        .state
+                }
+                other => panic!("unexpected test state: {other}"),
+            };
+            let expected = match observed_state {
+                "attempted" => N7ProjectionState::Attempted,
+                "applied" => N7ProjectionState::Applied,
+                "conflict" => N7ProjectionState::Conflict,
+                other => panic!("unexpected test state: {other}"),
+            };
+            assert_eq!(expected_state, expected);
             let (root, authority_id) = owner_authority(&fixture.store, [capability]);
             let expires_at = now() + Duration::minutes(5);
             let authorization = fixture
