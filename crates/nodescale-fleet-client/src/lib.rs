@@ -239,6 +239,7 @@ pub enum ApplyOutcome {
     Stale,
     Gap,
     Conflict,
+    Regression,
 }
 
 /// The closed receipt from a completed apply request.

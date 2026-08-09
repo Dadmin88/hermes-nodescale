@@ -135,6 +135,7 @@ fn all_current_fleet_apply_outcomes_decode_exactly() {
         ("stale", ApplyOutcome::Stale),
         ("gap", ApplyOutcome::Gap),
         ("conflict", ApplyOutcome::Conflict),
+        ("regression", ApplyOutcome::Regression),
     ];
     for (wire_outcome, expected) in cases {
         let result: ApplyResult =
