@@ -5,7 +5,7 @@ use nodescale_domain::{
     KeryxBindingDecisionId, KeryxBindingId, KeryxBindingState, KeryxPeerId,
     N6AuthenticatedBindRequest, N6BindingChallengeDelivery, N6BindingChallengeRequest,
     N6BindingRevocationIntent, N6BindingRotationIntent, OperationId, OwnerTrustRootToken,
-    TrustAuthorityId,
+    TrustAuthorityId, n7::N6ActiveBindingProvenance,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -226,6 +226,50 @@ impl StateStore {
 
     pub fn n6_binding(&self, binding_id: KeryxBindingId) -> Result<N6BindingView, StateError> {
         self.transactional(|tx, store| store.n6_binding_view_tx(tx, binding_id))
+    }
+
+    /// Reads the sole production bridge from N6 durable state into N7 domain
+    /// provenance. It succeeds only for this exact active binding tuple; a
+    /// pending, stale, rotated, revoked, peerless, or mismatched row is not
+    /// evidence and fails closed.
+    ///
+    /// The result is opaque domain evidence, not a request DTO: callers cannot
+    /// deserialize or seed it outside the authenticated N6 lifecycle.
+    pub fn n6_active_binding_provenance(
+        &self,
+        binding_id: KeryxBindingId,
+        network_id: NetworkId,
+        device_id: DeviceId,
+        binding_generation: Generation,
+    ) -> Result<N6ActiveBindingProvenance, StateError> {
+        self.transactional(|tx, _store| {
+            let verified_peer_id = tx
+                .query_row(
+                    "SELECT verified_peer_id FROM n6_binding_records \
+                     WHERE binding_id=?1 AND network_id=?2 AND device_id=?3 \
+                       AND generation=?4 AND binding_state='active' \
+                       AND verified_peer_id IS NOT NULL",
+                    params![
+                        binding_id.to_string(),
+                        network_id.to_string(),
+                        device_id.to_string(),
+                        binding_generation.get(),
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| StateError::NotFound("exact active N6 binding provenance".into()))?;
+            let verified_peer_id = KeryxPeerId::parse(verified_peer_id)
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            N6ActiveBindingProvenance::from_verified_active_runtime_row(
+                network_id,
+                device_id,
+                binding_id,
+                verified_peer_id,
+                binding_generation,
+            )
+            .map_err(|error| StateError::Conflict(error.to_string()))
+        })
     }
 
     pub fn n6_active_binding(

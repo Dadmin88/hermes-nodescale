@@ -1,0 +1,24 @@
+[package]
+name = "nodescale-projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+nodescale-domain = { path = "../nodescale-domain" }
+nodescale-fleet-client = { path = "../nodescale-fleet-client" }
+nodescale-state = { path = "../nodescale-state" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

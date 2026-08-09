@@ -10,6 +10,8 @@ members = [
   "crates/nodescale-redemption-ingress",
   "crates/nodescale-binding",
   "crates/nodescale-keryx-adapter",
+  "crates/nodescale-fleet-client",
+  "crates/nodescale-projection",
 ]
 resolver = "2"
 

@@ -2449,6 +2449,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodescale-fleet-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "nodescale-invitation"
 version = "0.1.0"
 dependencies = [
@@ -2475,6 +2486,21 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tonic",
+]
+
+[[package]]
+name = "nodescale-projection"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nodescale-domain",
+ "nodescale-fleet-client",
+ "nodescale-state",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

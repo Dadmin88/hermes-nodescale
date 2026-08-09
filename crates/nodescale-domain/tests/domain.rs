@@ -143,7 +143,7 @@ fn binding_revocation_and_projection_transitions_are_explicit() {
     assert!(
         ProjectionStatus::Applied
             .transition(ProjectionStatus::Pending)
-            .is_err()
+            .is_ok()
     );
 }
 

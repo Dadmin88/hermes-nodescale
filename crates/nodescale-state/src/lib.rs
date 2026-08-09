@@ -27,10 +27,12 @@ mod n5;
 pub use n5::*;
 mod n6;
 pub use n6::*;
+mod n7;
+pub use n7::*;
 #[cfg(test)]
 mod n5_identity_trust_tests;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 const MUTATION_AUTHORIZATION_MIGRATION: &str =
@@ -40,6 +42,7 @@ const INVITATION_LIFECYCLE_MIGRATION: &str =
 const DEVICE_TRUST_MIGRATION: &str = include_str!("../migrations/0005_device_trust.sql");
 const KERYX_IDENTITY_BINDING_MIGRATION: &str =
     include_str!("../migrations/0006_keryx_identity_binding.sql");
+const FLEET_PROJECTION_MIGRATION: &str = include_str!("../migrations/0007_fleet_projection.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -727,6 +730,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
+                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -745,6 +749,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
+                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -762,6 +767,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
+                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -778,6 +784,7 @@ impl StateStore {
                 .execute_batch(INVITATION_LIFECYCLE_MIGRATION)
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
+                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -793,6 +800,7 @@ impl StateStore {
             let migration_result = connection
                 .execute_batch(DEVICE_TRUST_MIGRATION)
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
+                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -807,6 +815,21 @@ impl StateStore {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
             let migration_result = connection
                 .execute_batch(KERYX_IDENTITY_BINDING_MIGRATION)
+                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 6 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result = connection
+                .execute_batch(FLEET_PROJECTION_MIGRATION)
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });

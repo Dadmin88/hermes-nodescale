@@ -225,8 +225,16 @@ pub mod production {
         // An attempt may have reached Fleet before an earlier response was lost.
         // Always inspect it before considering a new apply, including after restart.
         if view.state == N7ProjectionState::Attempted {
-            return inspect_and_recover(store, transport, &operation_id, &desired, &document, view)
-                .await;
+            return inspect_and_recover(
+                store,
+                transport,
+                &operation_id,
+                &desired,
+                &document,
+                view,
+                true,
+            )
+            .await;
         }
 
         let attempted = store
@@ -264,6 +272,7 @@ pub mod production {
                     &desired,
                     &document,
                     attempted,
+                    false,
                 )
                 .await
             }
@@ -303,6 +312,7 @@ pub mod production {
         desired: &N7FleetDesiredProjection,
         document: &ProjectionDocument,
         view: N7ProjectionView,
+        retry_dispatch_allowed: bool,
     ) -> Result<N7ProjectionOutcome, N7ProductionError>
     where
         T: FleetProjectionTransport,
@@ -324,7 +334,7 @@ pub mod production {
                 desired.device_id(),
                 desired.projection_generation(),
                 view.revision,
-                inspection,
+                inspection.clone(),
                 Utc::now(),
             )
             .map_err(state_error)?;
@@ -332,9 +342,78 @@ pub mod production {
             N7ProjectionState::Applied => Ok(N7ProjectionOutcome::Applied),
             N7ProjectionState::Conflict => Ok(N7ProjectionOutcome::Conflict),
             N7ProjectionState::Desired | N7ProjectionState::Attempted => {
-                // `Missing` and unavailable authority are explicitly non-terminal.
-                let _ = document;
-                Ok(N7ProjectionOutcome::Retryable)
+                match inspection {
+                    // No authority read means no new request. A later reconciliation must
+                    // begin from the same inspection boundary rather than blindly reapply.
+                    N7AuthoritativeInspection::Unavailable => Ok(N7ProjectionOutcome::Retryable),
+                    // A durable attempted operation is inspected before every retry. Only an
+                    // authoritative missing result permits an append-only replacement attempt.
+                    N7AuthoritativeInspection::Missing if retry_dispatch_allowed => {
+                        let attempted = store
+                            .record_n7_projection_dispatch_attempt(
+                                operation_id,
+                                desired.device_id(),
+                                desired.projection_generation(),
+                                recovered.revision,
+                                Utc::now(),
+                            )
+                            .map_err(state_error)?;
+                        let attempted = match attempted {
+                            N7ProjectionAttemptOutcome::Recorded(view)
+                            | N7ProjectionAttemptOutcome::Replayed(view) => view,
+                        };
+                        if attempted.state != N7ProjectionState::Attempted {
+                            return Err(N7ProductionError::State(
+                                "N7 retry attempt was not durable before apply".into(),
+                            ));
+                        }
+                        match transport.apply(document.clone()).await {
+                            Ok(_)
+                            | Err(ApplyError::Ambiguous)
+                            | Err(ApplyError::ProtocolRejected) => {
+                                // This is the read-back for the newly appended retry attempt.
+                                // A second Missing remains retryable; it never recursively turns
+                                // one authority response into an unbounded apply loop.
+                                let post_inspection = match transport
+                                    .inspect(InspectSelector::new(
+                                        desired.network_id().to_string(),
+                                        desired.device_id().to_string(),
+                                    ))
+                                    .await
+                                {
+                                    Ok(result) => inspection_from_result(result)?,
+                                    Err(_) => N7AuthoritativeInspection::unavailable(),
+                                };
+                                let post = store
+                                    .recover_n7_projection_from_inspection(
+                                        operation_id,
+                                        desired.device_id(),
+                                        desired.projection_generation(),
+                                        attempted.revision,
+                                        post_inspection,
+                                        Utc::now(),
+                                    )
+                                    .map_err(state_error)?;
+                                match post.state {
+                                    N7ProjectionState::Applied => Ok(N7ProjectionOutcome::Applied),
+                                    N7ProjectionState::Conflict => {
+                                        Ok(N7ProjectionOutcome::Conflict)
+                                    }
+                                    N7ProjectionState::Desired | N7ProjectionState::Attempted => {
+                                        Ok(N7ProjectionOutcome::Retryable)
+                                    }
+                                }
+                            }
+                            Err(ApplyError::Unavailable) | Err(ApplyError::RejectedBeforeSend) => {
+                                Ok(N7ProjectionOutcome::Retryable)
+                            }
+                        }
+                    }
+                    N7AuthoritativeInspection::Missing
+                    | N7AuthoritativeInspection::Observed { .. } => {
+                        Ok(N7ProjectionOutcome::Retryable)
+                    }
+                }
             }
         }
     }

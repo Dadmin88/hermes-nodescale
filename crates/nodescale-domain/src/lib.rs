@@ -1,5 +1,7 @@
 //! Pure Nodescale domain model and fail-closed lifecycle rules.
 
+pub mod n7;
+
 use argon2::{
     Algorithm, Argon2, Params, Version,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -581,7 +583,10 @@ transition_enum!(
         ) | (
             ProjectionStatus::Conflict,
             ProjectionStatus::Pending | ProjectionStatus::Revoked
-        ) | (ProjectionStatus::Applied, ProjectionStatus::Revoked)
+        ) | (
+            ProjectionStatus::Applied,
+            ProjectionStatus::Pending | ProjectionStatus::Revoked
+        )
     )
 );
 transition_enum!(

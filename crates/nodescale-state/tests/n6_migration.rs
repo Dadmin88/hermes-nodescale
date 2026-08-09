@@ -4,12 +4,13 @@ use rusqlite::{Connection, params};
 use tempfile::tempdir;
 use uuid::Uuid;
 
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     include_str!("../migrations/0001_initial.sql"),
     include_str!("../migrations/0002_discovery_reconciliation.sql"),
     include_str!("../migrations/0003_mutation_authorization.sql"),
     include_str!("../migrations/0004_invitation_lifecycle.sql"),
     include_str!("../migrations/0005_device_trust.sql"),
+    include_str!("../migrations/0006_keryx_identity_binding.sql"),
 ];
 
 const NETWORK: &str = "10bdbae2-73be-46f2-8f0a-5b761fdeaf4d";
@@ -350,13 +351,13 @@ fn insert_pending_challenge(
 }
 
 #[test]
-fn fresh_schema_is_v6_and_exposes_only_authoritative_n6_tables() {
+fn fresh_schema_is_v7_and_retains_authoritative_n6_tables() {
     let store = StateStore::open_in_memory().unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 6);
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 7);
+    assert_eq!(store.schema_version().unwrap(), 7);
 
     let directory = tempdir().unwrap();
-    let path = directory.path().join("fresh-v6.db");
+    let path = directory.path().join("fresh-v7.db");
     drop(StateStore::open(&path).unwrap());
     let connection = Connection::open(path).unwrap();
     connection
@@ -418,8 +419,8 @@ fn fresh_schema_is_v6_and_exposes_only_authoritative_n6_tables() {
 }
 
 #[test]
-fn every_supported_predecessor_upgrades_to_v6_without_losing_n5_identity() {
-    for predecessor in 1_u32..=5 {
+fn every_supported_predecessor_upgrades_to_v7_without_losing_n5_or_n6_state() {
+    for predecessor in 1_u32..=6 {
         let directory = tempdir().unwrap();
         let path = directory.path().join(format!("v{predecessor}.db"));
         let connection = Connection::open(&path).unwrap();
@@ -429,7 +430,7 @@ fn every_supported_predecessor_upgrades_to_v6_without_losing_n5_identity() {
         for migration in MIGRATIONS.iter().take(predecessor as usize) {
             connection.execute_batch(migration).unwrap();
         }
-        if predecessor == 5 {
+        if predecessor >= 5 {
             seed_n5_confirmed_provenance(&connection);
         }
         connection
@@ -438,19 +439,37 @@ fn every_supported_predecessor_upgrades_to_v6_without_losing_n5_identity() {
         drop(connection);
 
         let store = StateStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
         drop(store);
         let connection = Connection::open(path).unwrap();
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        if predecessor == 5 {
+        for table in [
+            "n7_fleet_projection_records",
+            "n7_fleet_projection_operations",
+            "n7_fleet_projection_attempts",
+            "n7_fleet_projection_audit",
+        ] {
+            assert!(table_exists(&connection, table), "missing N7 table {table}");
+        }
+        if predecessor >= 5 {
             let preserved: i64 = connection
                 .query_row("SELECT COUNT(*) FROM n5_device_identities", [], |row| {
                     row.get(0)
                 })
                 .unwrap();
             assert_eq!(preserved, 1);
+        }
+        if predecessor == 6 {
+            let preserved: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM n6_binding_authority_capabilities",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(preserved, 2);
         }
         let integrity: String = connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
