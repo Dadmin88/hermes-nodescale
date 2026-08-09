@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use nodescale_domain::{
-    AgentVersion, DeviceId, DeviceTrustAuthorityAdminIntent, DeviceTrustCapability, Generation,
-    JoinSessionId, KeryxBindingAuthorizationCapability, KeryxBindingDecisionId, KeryxPeerId,
-    N6AuthenticatedBindRequest, N6BindingChallengeRequest, N6BindingRevocationIntent,
+    AgentVersion, Device, DeviceId, DeviceTrustAuthorityAdminIntent, DeviceTrustCapability,
+    Generation, JoinSessionId, KeryxBindingAuthorizationCapability, KeryxBindingDecisionId,
+    KeryxPeerId, N6AuthenticatedBindRequest, N6BindingChallengeRequest, N6BindingRevocationIntent,
     N6BindingRotationIntent, NetworkId, OperationId, OwnerTrustRootToken, ReasonCode,
     TrustAuthorityId, TrustRootId,
 };
@@ -60,6 +60,19 @@ fn seed_confirmed_n5_provenance(path: &std::path::Path) {
              VALUES ('cafa4427-4c17-408e-bfed-c93f34bd3756','610c7a7c-ee1b-4579-a7c1-2e5fbba13765','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6','00000000-0000-0000-0000-000000000006','confirmed',1,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1000,1001,'1647eae9-8b5a-43e8-95b0-9a2470dc440a');
              INSERT INTO n5_device_identities (device_id,network_id,origin_join_session_id,confirmed_at_ms,identity_revision,safe_correlation_digest)
              VALUES ('f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','cafa4427-4c17-408e-bfed-c93f34bd3756',1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');",
+        )
+        .unwrap();
+    let device = Device::new(
+        DeviceId::parse(DEVICE).unwrap(),
+        network_id(),
+        "n6 device",
+        now(),
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE devices SET record_json=?2 WHERE device_id=?1",
+            (DEVICE, serde_json::to_string(&device).unwrap()),
         )
         .unwrap();
 }
