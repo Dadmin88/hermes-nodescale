@@ -376,6 +376,60 @@ impl StateStore {
         })
     }
 
+    fn n6_fleet_authority_is_unresolved_tx(
+        &self,
+        tx: &Transaction<'_>,
+        binding: &N6BindingView,
+    ) -> Result<bool, StateError> {
+        // An attempted dispatch may still apply after a transport response is lost.
+        // Fence N6 authority changes until authoritative Fleet evidence either
+        // removes the managed node or replaces this exact binding provenance.
+        tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM n7_fleet_projection_records AS projection
+                WHERE projection.network_id=?1
+                  AND projection.device_id=?2
+                  AND projection.binding_id=?3
+                  AND projection.binding_generation=?4
+                  AND (
+                    projection.projection_state IN ('attempted','conflict')
+                    OR (
+                        projection.projection_state='applied'
+                        AND COALESCE(
+                            json_extract(CAST(projection.desired_body AS TEXT), '$.state'),
+                            ''
+                        )<>'removed'
+                    )
+                  )
+                  AND NOT EXISTS(
+                    SELECT 1
+                    FROM n7_fleet_projection_records AS successor
+                    WHERE successor.network_id=projection.network_id
+                      AND successor.device_id=projection.device_id
+                      AND successor.generation>projection.generation
+                      AND successor.projection_state='applied'
+                      AND (
+                        successor.binding_id<>projection.binding_id
+                        OR successor.binding_generation<>projection.binding_generation
+                        OR COALESCE(
+                            json_extract(CAST(successor.desired_body AS TEXT), '$.state'),
+                            ''
+                        )='removed'
+                      )
+                  )
+            )",
+            params![
+                binding.network_id.to_string(),
+                binding.device_id.to_string(),
+                binding.binding_id.to_string(),
+                binding.generation.get(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StateError::from)
+    }
+
     pub fn rotate_n6_binding(
         &self,
         intent: &N6BindingRotationIntent,
@@ -394,6 +448,11 @@ impl StateStore {
                     expected: intent.predecessor_revision(),
                     actual: predecessor.revision,
                 });
+            }
+            if store.n6_fleet_authority_is_unresolved_tx(tx, &predecessor)? {
+                return Err(StateError::Conflict(
+                    "N6 binding Fleet authority remains unresolved".into(),
+                ));
             }
             let agent_version = AgentVersion::parse(tx.query_row(
                 "SELECT agent_version FROM n6_binding_records WHERE binding_id=?1",
@@ -460,6 +519,11 @@ impl StateStore {
                     expected: intent.revision(),
                     actual: binding.revision,
                 });
+            }
+            if store.n6_fleet_authority_is_unresolved_tx(tx, &binding)? {
+                return Err(StateError::Conflict(
+                    "N6 binding Fleet authority remains unresolved".into(),
+                ));
             }
             let agent_version = AgentVersion::parse(tx.query_row(
                 "SELECT agent_version FROM n6_binding_records WHERE binding_id=?1",

@@ -7,7 +7,9 @@ use nodescale_domain::{
     TrustAuthorityId, TrustRootId,
 };
 use nodescale_state::{
-    N5TrustAuthorityConfiguration, N6AuthenticatedBindOutcome, N6BindingView, StateError,
+    N5TrustAuthorityConfiguration, N6AuthenticatedBindOutcome, N6BindingView,
+    N7AuthoritativeInspection, N7BindingProvenance, N7ProjectionAttemptOutcome,
+    N7ProjectionReservationOutcome, N7ProjectionState, N7ProjectionSubmission, StateError,
     StateStore,
 };
 use rusqlite::Connection;
@@ -203,6 +205,83 @@ fn assert_binding_unchanged(store: &StateStore, binding: &N6BindingView) {
     );
 }
 
+fn reserve_n7_projection_at(
+    fixture: &Fixture,
+    operation_id: &str,
+    generation: Generation,
+    body: &[u8],
+) -> N7ProjectionSubmission {
+    let binding = N7BindingProvenance::new(
+        fixture.active.binding_id.to_string(),
+        fixture
+            .active
+            .verified_peer_id
+            .as_ref()
+            .expect("active N6 fixture has its authenticated peer")
+            .to_string(),
+        fixture.active.generation,
+    )
+    .unwrap();
+    let submission = N7ProjectionSubmission::from_canonical(
+        OperationId::parse(operation_id).unwrap(),
+        network_id(),
+        DeviceId::parse(DEVICE).unwrap(),
+        generation,
+        body.to_vec(),
+        binding.binding_id,
+        binding.authenticated_peer_id,
+        binding.binding_generation,
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .reserve_n7_projection(&submission, now())
+            .unwrap(),
+        N7ProjectionReservationOutcome::Reserved(_)
+    ));
+    submission
+}
+
+fn reserve_n7_projection(fixture: &Fixture, operation_id: &str) -> N7ProjectionSubmission {
+    reserve_n7_projection_at(
+        fixture,
+        operation_id,
+        Generation::initial(),
+        br#"{"fleet":"desired","state":"active"}"#,
+    )
+}
+
+fn mark_n7_projection_attempted(fixture: &Fixture, submission: &N7ProjectionSubmission) -> u64 {
+    let attempted = fixture
+        .store
+        .record_n7_projection_dispatch_attempt(
+            &submission.operation_id,
+            DeviceId::parse(DEVICE).unwrap(),
+            submission.generation,
+            1,
+            now(),
+        )
+        .unwrap();
+    match attempted {
+        N7ProjectionAttemptOutcome::Recorded(view)
+            if view.state == N7ProjectionState::Attempted =>
+        {
+            view.revision
+        }
+        other => panic!("unexpected N7 dispatch attempt: {other:?}"),
+    }
+}
+
+fn record_n7_dispatch_attempt(
+    fixture: &Fixture,
+    operation_id: &str,
+) -> (N7ProjectionSubmission, u64) {
+    let submission = reserve_n7_projection(fixture, operation_id);
+    let revision = mark_n7_projection_attempted(fixture, &submission);
+    (submission, revision)
+}
+
 #[test]
 fn n6_rotation_and_revocation_reject_wrong_owner_root() {
     let fixture = fixture();
@@ -296,6 +375,164 @@ fn n6_rotation_and_revocation_recheck_authorization_expiry_at_consumption() {
         );
         assert_binding_unchanged(&fixture.store, &fixture.active);
     }
+}
+
+#[test]
+fn n6_rotation_and_revocation_fail_closed_after_a_durable_n7_dispatch_attempt() {
+    for observed_as_applied in [false, true] {
+        for capability in [
+            KeryxBindingAuthorizationCapability::Rotate,
+            KeryxBindingAuthorizationCapability::Revoke,
+        ] {
+            let fixture = fixture();
+            let (submission, attempted_revision) =
+                record_n7_dispatch_attempt(&fixture, "n7-dispatch-before-n6-control");
+            if observed_as_applied {
+                assert_eq!(
+                    fixture
+                        .store
+                        .recover_n7_projection_from_inspection(
+                            &submission.operation_id,
+                            DeviceId::parse(DEVICE).unwrap(),
+                            submission.generation,
+                            attempted_revision,
+                            N7AuthoritativeInspection::observed(
+                                br#"{"fleet":"desired","state":"active"}"#.to_vec(),
+                            )
+                            .unwrap(),
+                            now(),
+                        )
+                        .unwrap()
+                        .state,
+                    N7ProjectionState::Applied
+                );
+            }
+            let (root, authority_id) = owner_authority(&fixture.store, [capability]);
+            let expires_at = now() + Duration::minutes(5);
+            let authorization = fixture
+                .store
+                .issue_n6_binding_authorization(
+                    &root,
+                    authority_id,
+                    fixture.active.binding_id,
+                    capability,
+                    expires_at,
+                    now(),
+                )
+                .unwrap();
+            let result = match capability {
+                KeryxBindingAuthorizationCapability::Rotate => fixture.store.rotate_n6_binding(
+                    &rotation_intent(authorization, &fixture.active, expires_at),
+                    now(),
+                ),
+                KeryxBindingAuthorizationCapability::Revoke => fixture.store.revoke_n6_binding(
+                    &revocation_intent(authorization, &fixture.active, expires_at),
+                    now(),
+                ),
+            };
+            assert!(matches!(
+                result,
+                Err(StateError::Conflict(message)) if message.contains("Fleet authority remains unresolved")
+            ));
+            assert_binding_unchanged(&fixture.store, &fixture.active);
+        }
+    }
+}
+
+#[test]
+fn n6_revocation_succeeds_after_an_authoritative_applied_removal() {
+    let fixture = fixture();
+    let (active, active_revision) =
+        record_n7_dispatch_attempt(&fixture, "n7-active-before-removal");
+    fixture
+        .store
+        .recover_n7_projection_from_inspection(
+            &active.operation_id,
+            DeviceId::parse(DEVICE).unwrap(),
+            active.generation,
+            active_revision,
+            N7AuthoritativeInspection::observed(active.desired_body.clone()).unwrap(),
+            now(),
+        )
+        .unwrap();
+
+    let removed = reserve_n7_projection_at(
+        &fixture,
+        "n7-removal-before-revocation",
+        Generation::new(2).unwrap(),
+        br#"{"fleet":"desired","state":"removed"}"#,
+    );
+    let removed_revision = mark_n7_projection_attempted(&fixture, &removed);
+    assert_eq!(
+        fixture
+            .store
+            .recover_n7_projection_from_inspection(
+                &removed.operation_id,
+                DeviceId::parse(DEVICE).unwrap(),
+                removed.generation,
+                removed_revision,
+                N7AuthoritativeInspection::observed(removed.desired_body.clone()).unwrap(),
+                now(),
+            )
+            .unwrap()
+            .state,
+        N7ProjectionState::Applied
+    );
+
+    let (root, authority_id) = owner_authority(
+        &fixture.store,
+        [KeryxBindingAuthorizationCapability::Revoke],
+    );
+    let expires_at = now() + Duration::minutes(5);
+    let authorization = fixture
+        .store
+        .issue_n6_binding_authorization(
+            &root,
+            authority_id,
+            fixture.active.binding_id,
+            KeryxBindingAuthorizationCapability::Revoke,
+            expires_at,
+            now(),
+        )
+        .unwrap();
+    let revoked = fixture
+        .store
+        .revoke_n6_binding(
+            &revocation_intent(authorization, &fixture.active, expires_at),
+            now(),
+        )
+        .unwrap();
+    assert_eq!(revoked.state, nodescale_domain::KeryxBindingState::Revoked);
+}
+
+#[test]
+fn n6_revocation_remains_valid_before_any_n7_dispatch_attempt() {
+    let fixture = fixture();
+    reserve_n7_projection(&fixture, "n7-desired-before-n6-revocation");
+    let (root, authority_id) = owner_authority(
+        &fixture.store,
+        [KeryxBindingAuthorizationCapability::Revoke],
+    );
+    let expires_at = now() + Duration::minutes(5);
+    let authorization = fixture
+        .store
+        .issue_n6_binding_authorization(
+            &root,
+            authority_id,
+            fixture.active.binding_id,
+            KeryxBindingAuthorizationCapability::Revoke,
+            expires_at,
+            now(),
+        )
+        .unwrap();
+    let revoked = fixture
+        .store
+        .revoke_n6_binding(
+            &revocation_intent(authorization, &fixture.active, expires_at),
+            now(),
+        )
+        .unwrap();
+    assert_eq!(revoked.state, nodescale_domain::KeryxBindingState::Revoked);
 }
 
 #[test]
