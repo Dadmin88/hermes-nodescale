@@ -114,6 +114,34 @@ fn rotating_sources_cannot_allocate_unbounded_state() {
 }
 
 #[test]
+fn stale_sources_do_not_permanently_saturate_tracking_capacity() {
+    let source_refill = Duration::from_secs(30);
+    let limits = AdmissionLimits::bounded(256, 1, source_refill, 3, Duration::from_secs(1), 2, 1)
+        .unwrap()
+        .with_initial_tokens(1, 3)
+        .unwrap();
+    let now = Instant::now();
+    let mut admission = InMemoryAdmissionController::new(limits, now).unwrap();
+
+    assert_eq!(
+        admission.admit("192.0.2.1".parse().unwrap(), now),
+        AdmissionDecision::Allowed
+    );
+    assert_eq!(
+        admission.admit("192.0.2.2".parse().unwrap(), now),
+        AdmissionDecision::Allowed
+    );
+    assert_eq!(admission.tracked_source_count(), 2);
+
+    let after_expiry = now + source_refill;
+    assert_eq!(
+        admission.admit("192.0.2.3".parse().unwrap(), after_expiry),
+        AdmissionDecision::Allowed
+    );
+    assert_eq!(admission.tracked_source_count(), 2);
+}
+
+#[test]
 fn configuration_is_bounded_by_hard_safety_ceilings() {
     let custom = AdmissionLimits::bounded(
         512,
