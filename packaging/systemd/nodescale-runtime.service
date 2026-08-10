@@ -1,5 +1,5 @@
 [Unit]
-Description=Nodescale provider reconciliation and Fleet projection runtime
+Description=Nodescale provider observation reconciliation runtime
 Documentation=https://github.com/Dadmin88/nodescale
 Wants=network-online.target
 After=network-online.target

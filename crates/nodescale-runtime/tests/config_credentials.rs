@@ -7,7 +7,6 @@ use tempfile::tempdir;
 fn valid_config() -> RuntimeConfig {
     RuntimeConfig {
         state_path: PathBuf::from("/var/lib/nodescale/state.sqlite3"),
-        fleet_socket: PathBuf::from("/run/hermes-fleet/managed-projection.sock"),
         poll_interval_seconds: 30,
         network_id: "11111111-1111-1111-1111-111111111111".into(),
         network_name: "Provider-neutral network".into(),
@@ -28,7 +27,6 @@ fn strict_toml_loads_reference_only_tailscale_configuration() {
         &path,
         r#"
 state_path = "/var/lib/nodescale/state.sqlite3"
-fleet_socket = "/run/hermes-fleet/managed-projection.sock"
 poll_interval_seconds = 30
 network_id = "11111111-1111-1111-1111-111111111111"
 network_name = "Provider-neutral network"
@@ -67,7 +65,6 @@ fn plaintext_and_unknown_configuration_fail_closed() {
         &path,
         r#"
 state_path = "/var/lib/nodescale/state.sqlite3"
-fleet_socket = "/run/hermes-fleet/managed-projection.sock"
 poll_interval_seconds = 30
 network_id = "11111111-1111-1111-1111-111111111111"
 network_name = "Provider-neutral network"

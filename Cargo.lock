@@ -2595,9 +2595,8 @@ name = "nodescale-runtime"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "nodescale-domain",
- "nodescale-fleet-client",
- "nodescale-projection",
  "nodescale-provider",
  "nodescale-provider-headscale",
  "nodescale-provider-tailscale",

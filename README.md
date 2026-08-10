@@ -178,6 +178,8 @@ Useful references:
 - [Device identity and trust](docs/device-trust.md)
 - [N6 authenticated Keryx binding](docs/n6-authenticated-keryx-binding.md)
 - [N7 authenticated Fleet projection](docs/n7-authenticated-fleet-projection.md)
+- [Provider observation runtime](docs/runtime.md)
+- [N8 provider-neutral Fleet projection reconciler](docs/n8-provider-neutral-fleet-reconciler.md)
 - [Provider contract](docs/provider-contract.md)
 - [Headscale compatibility](docs/headscale-compatibility.md)
 - [Threat model](docs/threat-model.md)

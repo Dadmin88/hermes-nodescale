@@ -1,6 +1,5 @@
 # Example only: replace the generic IDs, origin, and version pin.
 state_path = "/var/lib/nodescale/state.sqlite3"
-fleet_socket = "/run/hermes-fleet/managed-projection.sock"
 poll_interval_seconds = 30
 network_id = "11111111-1111-1111-1111-111111111111"
 network_name = "Headscale network"

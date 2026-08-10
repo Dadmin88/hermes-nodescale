@@ -1,7 +1,4 @@
-use nodescale_runtime::{
-    RuntimeConfig, RuntimeError, build_provider, poll_interval, run_cycle, shutdown_projector,
-    start_projector,
-};
+use nodescale_runtime::{RuntimeConfig, RuntimeError, build_provider, poll_interval, run_cycle};
 use nodescale_state::StateStore;
 use std::{env, path::PathBuf};
 use tokio::{
@@ -45,20 +42,12 @@ async fn main() -> Result<(), RuntimeError> {
     let config = RuntimeConfig::load(&arguments.config)?;
     let provider = build_provider(&config.provider)?;
     let store = StateStore::open(&config.state_path)?;
-    let projector = start_projector(&config.state_path, &config.fleet_socket)?;
 
     if arguments.once {
-        let outcome = run_cycle(&store, &config, &provider, &projector).await;
-        shutdown_projector(&projector).await?;
-        let outcome = outcome?;
+        let outcome = run_cycle(&store, &config, &provider).await?;
         eprintln!(
-            "nodescale cycle complete: imported={} observed={} desired={} applied_or_replayed={} retryable={} conflicts={}",
-            outcome.imported,
-            outcome.observed_nodes,
-            outcome.desired_projections,
-            outcome.applied_or_replayed,
-            outcome.retryable,
-            outcome.conflicts
+            "nodescale observation cycle complete: imported={} observed={}",
+            outcome.imported, outcome.observed_nodes
         );
         return Ok(());
     }
@@ -73,17 +62,13 @@ async fn main() -> Result<(), RuntimeError> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                match run_cycle(&store, &config, &provider, &projector).await {
+                match run_cycle(&store, &config, &provider).await {
                     Ok(outcome) => eprintln!(
-                        "nodescale cycle complete: imported={} observed={} desired={} applied_or_replayed={} retryable={} conflicts={}",
+                        "nodescale observation cycle complete: imported={} observed={}",
                         outcome.imported,
-                        outcome.observed_nodes,
-                        outcome.desired_projections,
-                        outcome.applied_or_replayed,
-                        outcome.retryable,
-                        outcome.conflicts
+                        outcome.observed_nodes
                     ),
-                    Err(error) => eprintln!("nodescale cycle failed: {error}"),
+                    Err(error) => eprintln!("nodescale observation cycle failed: {error}"),
                 }
             }
             _ = terminate.recv() => break,
@@ -91,5 +76,5 @@ async fn main() -> Result<(), RuntimeError> {
         }
     }
 
-    shutdown_projector(&projector).await
+    Ok(())
 }

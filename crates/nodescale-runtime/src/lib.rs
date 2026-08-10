@@ -1,12 +1,8 @@
-//! Minimal restart-safe Nodescale provider reconciliation and N7 projection runtime.
+//! Minimal restart-safe Nodescale provider observation reconciliation runtime.
 
 use chrono::Utc;
 use nodescale_domain::{
-    AuditActor, Network, NetworkId, OperationId, ProviderApiKey, ProviderInstanceId, ProviderKind,
-};
-use nodescale_fleet_client::FleetClient;
-use nodescale_projection::production::{
-    N7ProductionError, N7ProjectionOutcome, N7ProjectionService,
+    AuditActor, Network, NetworkId, ProviderApiKey, ProviderInstanceId, ProviderKind,
 };
 use nodescale_provider::ReadOnlyProvider;
 use nodescale_provider_headscale::{HeadscaleClientOptions, HeadscaleProvider};
@@ -16,8 +12,12 @@ use nodescale_state::{
     TlsVerificationPolicy,
 };
 use serde::Deserialize;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
-    env, fs,
+    env,
+    fs::{self, OpenOptions},
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -27,7 +27,6 @@ use thiserror::Error;
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub state_path: PathBuf,
-    pub fleet_socket: PathBuf,
     pub poll_interval_seconds: u64,
     pub network_id: String,
     pub network_name: String,
@@ -73,8 +72,6 @@ pub enum RuntimeError {
     ProviderConstruction,
     #[error("provider reconciliation failed")]
     Reconciliation,
-    #[error("N7 projection failed: {0}")]
-    Projection(String),
     #[error(transparent)]
     State(#[from] StateError),
 }
@@ -88,10 +85,8 @@ impl RuntimeConfig {
     }
 
     pub fn validate(&self) -> Result<(), RuntimeError> {
-        if !self.state_path.is_absolute() || !self.fleet_socket.is_absolute() {
-            return Err(RuntimeError::Configuration(
-                "state_path and fleet_socket must be absolute",
-            ));
+        if !self.state_path.is_absolute() {
+            return Err(RuntimeError::Configuration("state_path must be absolute"));
         }
         if !(5..=86_400).contains(&self.poll_interval_seconds) {
             return Err(RuntimeError::Configuration(
@@ -298,17 +293,12 @@ pub fn build_provider(config: &ProviderConfig) -> Result<ProviderRuntime, Runtim
 pub struct CycleOutcome {
     pub imported: bool,
     pub observed_nodes: u64,
-    pub desired_projections: usize,
-    pub applied_or_replayed: usize,
-    pub retryable: usize,
-    pub conflicts: usize,
 }
 
 pub async fn run_cycle(
     store: &StateStore,
     config: &RuntimeConfig,
     provider: &ProviderRuntime,
-    projector: &N7ProjectionService<FleetClient>,
 ) -> Result<CycleOutcome, RuntimeError> {
     let network_id = config.network_id()?;
     let configured_instance = config.provider.instance_id()?;
@@ -352,56 +342,14 @@ pub async fn run_cycle(
     };
 
     let report = store.reconciliation_report(network_id)?;
-    let desired = store.n7_runtime_desired_projections(network_id)?;
-    let mut outcome = CycleOutcome {
+    Ok(CycleOutcome {
         imported,
         observed_nodes: report.observed_count,
-        desired_projections: desired.len(),
-        applied_or_replayed: 0,
-        retryable: 0,
-        conflicts: 0,
-    };
-    for desired in desired {
-        let operation_id =
-            OperationId::parse(format!("runtime-n7-{}", desired.content_digest().as_str()))
-                .map_err(|_| {
-                    RuntimeError::Projection("invalid deterministic operation ID".into())
-                })?;
-        match projector
-            .reconcile(operation_id, desired)
-            .await
-            .map_err(|error| RuntimeError::Projection(error.to_string()))?
-        {
-            N7ProjectionOutcome::Applied | N7ProjectionOutcome::AlreadyApplied => {
-                outcome.applied_or_replayed += 1;
-            }
-            N7ProjectionOutcome::Retryable => outcome.retryable += 1,
-            N7ProjectionOutcome::Conflict => outcome.conflicts += 1,
-        }
-    }
-    Ok(outcome)
-}
-
-pub fn start_projector(
-    state_path: impl AsRef<Path>,
-    fleet_socket: impl AsRef<Path>,
-) -> Result<N7ProjectionService<FleetClient>, RuntimeError> {
-    let store = StateStore::open(state_path)?;
-    N7ProjectionService::start(store, FleetClient::new(fleet_socket))
-        .map_err(|error| RuntimeError::Projection(error.to_string()))
+    })
 }
 
 pub fn poll_interval(config: &RuntimeConfig) -> Duration {
     Duration::from_secs(config.poll_interval_seconds)
-}
-
-pub async fn shutdown_projector(
-    projector: &N7ProjectionService<FleetClient>,
-) -> Result<(), RuntimeError> {
-    projector
-        .shutdown()
-        .await
-        .map_err(|error: N7ProductionError| RuntimeError::Projection(error.to_string()))
 }
 
 pub fn resolve_systemd_credential(
@@ -419,11 +367,26 @@ pub fn resolve_systemd_credential(
         return Err(RuntimeError::CredentialUnavailable);
     }
     let path = directory.join(name);
-    let metadata = fs::symlink_metadata(&path).map_err(|_| RuntimeError::CredentialUnavailable)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .map_err(|_| RuntimeError::CredentialUnavailable)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| RuntimeError::CredentialUnavailable)?;
     if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > 4_096 {
         return Err(RuntimeError::CredentialUnavailable);
     }
-    let bytes = fs::read(path).map_err(|_| RuntimeError::CredentialUnavailable)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(4_097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RuntimeError::CredentialUnavailable)?;
+    if bytes.len() > 4_096 {
+        return Err(RuntimeError::CredentialUnavailable);
+    }
     let mut secret = String::from_utf8(bytes).map_err(|_| RuntimeError::CredentialUnavailable)?;
     if secret.ends_with("\r\n") {
         secret.truncate(secret.len() - 2);
