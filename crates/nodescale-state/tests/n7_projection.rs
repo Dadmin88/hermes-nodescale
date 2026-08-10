@@ -443,6 +443,93 @@ fn response_loss_restart_preserves_attempt_and_retries_missing_or_unavailable_in
 }
 
 #[test]
+fn retry_dispatch_requires_the_exact_n6_binding_to_remain_active() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("n7-retry-active-provenance.db");
+    let store = StateStore::open(&path).unwrap();
+    let (network_id, device_id) = seed(&store);
+    let binding = seed_active_n6(&store, &path, network_id, device_id);
+    let request = submission(
+        network_id,
+        device_id,
+        "n7-retry-active-provenance",
+        DESIRED_BODY,
+        &binding,
+    );
+    let reserved = match store.reserve_n7_projection(&request, now()).unwrap() {
+        N7ProjectionReservationOutcome::Reserved(view) => view,
+        other => panic!("unexpected reservation: {other:?}"),
+    };
+    let attempted = match store
+        .record_n7_projection_dispatch_attempt(
+            &request.operation_id,
+            device_id,
+            request.generation,
+            reserved.revision,
+            now(),
+        )
+        .unwrap()
+    {
+        N7ProjectionAttemptOutcome::Recorded(view) => view,
+        other => panic!("unexpected attempt outcome: {other:?}"),
+    };
+
+    // Model an N6 authority transition independently of the N7 dispatch API.
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP TRIGGER n6_binding_transition_guard;",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE n6_binding_records SET binding_state='stale',revision=revision+1,stale_at_ms=?1,last_decision_id='a0000000-0000-0000-0000-000000000001',last_audit_event_id='a0000000-0000-0000-0000-000000000002' WHERE binding_id=?2",
+            params![now().timestamp_millis(), binding.binding_id],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        store.record_n7_projection_dispatch_attempt(
+            &request.operation_id,
+            device_id,
+            request.generation,
+            attempted.revision,
+            now(),
+        ),
+        Err(StateError::Conflict(message)) if message == "N7 binding provenance is no longer active"
+    ));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM n7_fleet_projection_attempts",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+
+    connection
+        .execute(
+            "INSERT INTO n7_fleet_projection_attempts (attempt_id,projection_id,operation_id,attempt_number,expected_revision,attempted_at_ms) SELECT 'a0000000-0000-0000-0000-000000000003',projection_id,?1,2,2,?2 FROM n7_fleet_projection_records",
+            params![request.operation_id.as_str(), now().timestamp_millis()],
+        )
+        .unwrap();
+    let error = connection
+        .execute(
+            "UPDATE n7_fleet_projection_records SET current_attempt_id='a0000000-0000-0000-0000-000000000003' WHERE projection_state='attempted'",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("N7 projection transition requires exact durable identity")
+    );
+}
+
+#[test]
 fn a_matching_hash_without_matching_full_observed_body_never_emits_applied_evidence() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("n7-inspect-conflict.db");

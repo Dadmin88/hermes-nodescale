@@ -271,6 +271,9 @@ impl StateStore {
                     Ok(N7ProjectionAttemptOutcome::Recorded(store.n7_projection_view_tx(tx, &projection_id)?))
                 }
                 N7ProjectionState::Attempted => {
+                    if !store.n7_binding_is_active_tx(tx, view.network_id, device_id, &view.binding)? {
+                        return Err(StateError::Conflict("N7 binding provenance is no longer active".into()));
+                    }
                     let next_attempt = store.n7_next_attempt_number_tx(tx, &projection_id)?;
                     let attempt_id = uuid::Uuid::new_v4().to_string();
                     tx.execute(
