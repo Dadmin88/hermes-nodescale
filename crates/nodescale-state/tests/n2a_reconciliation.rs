@@ -122,6 +122,53 @@ fn config(instance: ProviderInstanceId) -> HeadscaleImportConfig {
 }
 
 #[tokio::test]
+async fn import_rejects_deserialized_plaintext_secret_before_persistence() {
+    let store = StateStore::open_in_memory().unwrap();
+    let instance = ProviderInstanceId::new();
+    let network = Network::new(
+        NetworkId::new(),
+        "plaintext-secret-import",
+        ProviderKind::Headscale,
+        instance,
+        now(),
+    )
+    .unwrap();
+    let bypassed_config: HeadscaleImportConfig = serde_json::from_value(serde_json::json!({
+        "server_url": "https://headscale.example.test",
+        "provider_instance_id": instance,
+        "opaque_secret_reference": "actual-plaintext-api-key",
+        "compatibility_pin": "v0.29.3",
+        "tls_verification": "verify",
+        "read_only": true,
+        "mutation_allowed": false
+    }))
+    .unwrap();
+
+    let result = store
+        .import_headscale_network(
+            &network,
+            &bypassed_config,
+            &provider(instance),
+            now(),
+            AuditActor::system(),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ReconciliationFailure::State(
+            nodescale_state::StateError::Conflict(message)
+        )) if message == "credential must be an opaque secret:// reference, not plaintext"
+    ));
+    assert!(
+        !store
+            .database_text_dump_for_test()
+            .unwrap()
+            .contains("actual-plaintext-api-key")
+    );
+}
+
+#[tokio::test]
 async fn imported_headscale_fixture_reconciles_new_nodes_as_unmanaged_without_devices() {
     let store = StateStore::open_in_memory().unwrap();
     let instance = ProviderInstanceId::new();
