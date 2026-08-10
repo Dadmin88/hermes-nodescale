@@ -122,3 +122,21 @@ fn systemd_credential_resolution_rejects_symlinks() {
         Err(RuntimeError::CredentialUnavailable)
     ));
 }
+
+#[test]
+fn packaged_runtime_declares_reproducible_install_and_encrypted_credential_loading() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let unit =
+        fs::read_to_string(root.join("packaging/systemd/nodescale-runtime.service")).unwrap();
+    assert!(unit.contains(
+        "LoadCredentialEncrypted=provider-token:/etc/credstore.encrypted/provider-token"
+    ));
+    assert!(!unit.contains("\nLoadCredential=provider-token\n"));
+
+    let documentation = fs::read_to_string(root.join("docs/runtime.md")).unwrap();
+    assert!(documentation.contains("cargo build -p nodescale-runtime --release --locked"));
+    assert!(documentation.contains("groupadd --system nodescale"));
+    assert!(documentation.contains("useradd --system --gid nodescale"));
+    assert!(documentation.contains("root:nodescale"));
+    assert!(documentation.contains("systemctl enable --now nodescale-runtime.service"));
+}
