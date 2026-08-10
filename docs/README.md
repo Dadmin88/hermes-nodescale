@@ -15,7 +15,9 @@ If you are new to the project, start with the architecture and identity pages. T
 - [Invitations and redemption](invitations.md) - how a device receives short-lived join material without exposing provider administration credentials.
 - [Device identity and trust](device-trust.md) - how Nodescale confirms the exact device and requires explicit owner trust.
 - [N6 authenticated Keryx binding](n6-authenticated-keryx-binding.md) - how a trusted device is bound to an authenticated application peer.
-- [N7 authenticated Fleet projection](n7-authenticated-fleet-projection.md) - how a trusted, Keryx-bound device is projected into Hermes Fleet with safe baseline authority.
+- [N7 authenticated Fleet projection](n7-authenticated-fleet-projection.md) - how an explicitly supplied trusted, Keryx-bound desired state is projected into Hermes Fleet with safe baseline authority.
+- [Provider observation runtime](runtime.md) - how provider observations are persisted without automatic Fleet authority.
+- [N8 provider-neutral Fleet projection reconciler](n8-provider-neutral-fleet-reconciler.md) - the bounded milestone required before automatic projection may be enabled.
 
 The simple flow is:
 

@@ -141,7 +141,7 @@ impl FakeProvider {
         let node = ProviderNode {
             identity: identity.clone(),
             identity_evidence: ProviderIdentityEvidence {
-                machine_key: ConditionalIdentityEvidence::new(stable_key)?,
+                machine_key: Some(ConditionalIdentityEvidence::new(stable_key)?),
                 node_key: Some(MutableIdentityEvidence::new(format!(
                     "fake-node-key-{node_number:04}"
                 ))?),
@@ -159,7 +159,7 @@ impl FakeProvider {
             last_seen: None,
             expires_at: None,
             observed_at: fake_now(),
-            online: true,
+            online: Some(true),
             expired: false,
         };
         self.nodes

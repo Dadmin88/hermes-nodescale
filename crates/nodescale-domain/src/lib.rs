@@ -624,6 +624,7 @@ transition_enum!(
 pub enum ProviderKind {
     Fake,
     Headscale,
+    Tailscale,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

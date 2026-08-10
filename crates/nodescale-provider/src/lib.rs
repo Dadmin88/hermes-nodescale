@@ -169,8 +169,9 @@ identity_evidence!(
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderIdentityEvidence {
-    /// Strong correlation evidence, but replaceable in Headscale.
-    pub machine_key: ConditionalIdentityEvidence,
+    /// Provider-supplied machine-key correlation evidence when available.
+    /// Some providers, including Tailscale SaaS external devices, may omit it.
+    pub machine_key: Option<ConditionalIdentityEvidence>,
     /// Rotating cryptographic observations; never canonical identity.
     pub node_key: Option<MutableIdentityEvidence>,
     pub disco_key: Option<MutableIdentityEvidence>,
@@ -216,7 +217,8 @@ pub struct ProviderNode {
     pub last_seen: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
-    pub online: bool,
+    /// Provider-reported online state when that provider supplies one.
+    pub online: Option<bool>,
     pub expired: bool,
 }
 

@@ -251,8 +251,9 @@ fn provider_node(
         )
         .expect("valid fixture identity"),
         identity_evidence: ProviderIdentityEvidence {
-            machine_key: ConditionalIdentityEvidence::new(machine_key)
-                .expect("valid fixture machine key"),
+            machine_key: Some(
+                ConditionalIdentityEvidence::new(machine_key).expect("valid fixture machine key"),
+            ),
             node_key: None,
             disco_key: None,
         },
@@ -269,7 +270,7 @@ fn provider_node(
         last_seen: Some(Utc::now()),
         expires_at: None,
         observed_at: Utc::now(),
-        online: true,
+        online: Some(true),
         expired: false,
     }
 }

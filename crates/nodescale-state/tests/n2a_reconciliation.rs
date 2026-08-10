@@ -91,7 +91,7 @@ fn node(instance: ProviderInstanceId, id: &str, machine: &str, hostname: &str) -
         )
         .unwrap(),
         identity_evidence: ProviderIdentityEvidence {
-            machine_key: ConditionalIdentityEvidence::new(machine).unwrap(),
+            machine_key: Some(ConditionalIdentityEvidence::new(machine).unwrap()),
             node_key: Some(MutableIdentityEvidence::new("node-key").unwrap()),
             disco_key: Some(MutableIdentityEvidence::new("disco-key").unwrap()),
         },
@@ -105,7 +105,7 @@ fn node(instance: ProviderInstanceId, id: &str, machine: &str, hostname: &str) -
         last_seen: Some(now()),
         expires_at: None,
         observed_at: now(),
-        online: true,
+        online: Some(true),
         expired: false,
     }
 }
@@ -618,7 +618,7 @@ async fn deterministic_fake_drives_required_reconciliation_scenarios() {
 
     let mut conflicting = changed;
     conflicting.identity_evidence.machine_key =
-        ConditionalIdentityEvidence::new("machine-other").unwrap();
+        Some(ConditionalIdentityEvidence::new("machine-other").unwrap());
     source.seed_read_only_snapshot(vec![conflicting]);
     assert_eq!(
         store

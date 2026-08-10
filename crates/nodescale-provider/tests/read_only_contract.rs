@@ -41,7 +41,7 @@ fn provider_node_keeps_identity_classes_separate() {
     let node = ProviderNode {
         identity,
         identity_evidence: ProviderIdentityEvidence {
-            machine_key: ConditionalIdentityEvidence::new("mkey:synthetic").unwrap(),
+            machine_key: Some(ConditionalIdentityEvidence::new("mkey:synthetic").unwrap()),
             node_key: Some(MutableIdentityEvidence::new("nodekey:synthetic").unwrap()),
             disco_key: Some(MutableIdentityEvidence::new("discokey:synthetic").unwrap()),
         },
@@ -62,12 +62,12 @@ fn provider_node_keeps_identity_classes_separate() {
         last_seen: None,
         expires_at: None,
         observed_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
-        online: false,
+        online: Some(false),
         expired: false,
     };
 
     assert_eq!(
-        node.identity_evidence.machine_key.class(),
+        node.identity_evidence.machine_key.as_ref().unwrap().class(),
         IdentityEvidenceClass::StableConditional
     );
     assert_eq!(

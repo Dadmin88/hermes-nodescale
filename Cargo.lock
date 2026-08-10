@@ -2548,6 +2548,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodescale-provider-tailscale"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "nodescale-domain",
+ "nodescale-provider",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "nodescale-redemption-ingress"
 version = "0.1.0"
 dependencies = [
@@ -2571,6 +2588,24 @@ dependencies = [
  "tower",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "nodescale-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "nodescale-domain",
+ "nodescale-provider",
+ "nodescale-provider-headscale",
+ "nodescale-provider-tailscale",
+ "nodescale-state",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
 ]
 
 [[package]]
