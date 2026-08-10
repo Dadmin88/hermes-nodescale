@@ -259,13 +259,19 @@ impl Bucket {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SourceBucket {
+    bucket: Bucket,
+    last_seen: Instant,
+}
+
 #[derive(Debug)]
 pub struct InMemoryAdmissionController {
     limits: AdmissionLimits,
     initialized_at: Instant,
     global: Bucket,
     overflow: Bucket,
-    sources: HashMap<IpAddr, Bucket>,
+    sources: HashMap<IpAddr, SourceBucket>,
 }
 
 impl InMemoryAdmissionController {
@@ -303,9 +309,28 @@ impl InMemoryAdmissionController {
             New,
         }
 
+        if !self.sources.contains_key(&source)
+            && self.sources.len() >= self.limits.maximum_tracked_sources()
+        {
+            let stale_after = self
+                .limits
+                .source_refill_interval
+                .saturating_mul(self.limits.source_burst.get());
+            if let Some(stale_source) = self.sources.iter().find_map(|(source, bucket)| {
+                (now.saturating_duration_since(bucket.last_seen) >= stale_after).then_some(*source)
+            }) {
+                self.sources.remove(&stale_source);
+            }
+        }
+
         let (selected, source_decision, mut new_bucket) =
             if let Some(bucket) = self.sources.get_mut(&source) {
-                (SelectedBucket::Tracked, bucket.availability(now), None)
+                bucket.last_seen = bucket.last_seen.max(now);
+                (
+                    SelectedBucket::Tracked,
+                    bucket.bucket.availability(now),
+                    None,
+                )
             } else if self.sources.len() >= self.limits.maximum_tracked_sources() {
                 (
                     SelectedBucket::Overflow,
@@ -331,12 +356,18 @@ impl InMemoryAdmissionController {
         }
 
         match selected {
-            SelectedBucket::Tracked => self.sources.get_mut(&source).unwrap().debit(),
+            SelectedBucket::Tracked => self.sources.get_mut(&source).unwrap().bucket.debit(),
             SelectedBucket::Overflow => self.overflow.debit(),
             SelectedBucket::New => {
                 let mut bucket = new_bucket.take().unwrap();
                 bucket.debit();
-                self.sources.insert(source, bucket);
+                self.sources.insert(
+                    source,
+                    SourceBucket {
+                        bucket,
+                        last_seen: now,
+                    },
+                );
             }
         }
         self.global.debit();
