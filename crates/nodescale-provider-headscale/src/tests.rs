@@ -835,6 +835,42 @@ async fn file_and_unknown_policy_modes_are_exact_zero_traffic_unsupported() {
 }
 
 #[tokio::test]
+async fn policy_inspection_requires_manage_policy_authority_and_database_mode() {
+    for (mode, capability, expected_unsupported) in [
+        (
+            nodescale_provider::MutationPolicyMode::File,
+            ProviderMutationCapability::ManagePolicy,
+            true,
+        ),
+        (
+            nodescale_provider::MutationPolicyMode::Database,
+            ProviderMutationCapability::CreateJoinCredential,
+            false,
+        ),
+    ] {
+        let (endpoint, requests) = start_server_cases(Vec::new()).await;
+        let provider = HeadscaleMutationProvider::new_for_test(
+            &endpoint,
+            instance(),
+            test_api_key(),
+            HeadscaleClientOptions::default(),
+            mutation_config(mode),
+        )
+        .unwrap();
+        let outcome = provider
+            .inspect_policy(mutation_authorization(capability).await)
+            .await
+            .unwrap_err();
+        if expected_unsupported {
+            assert!(matches!(outcome, MutationOutcome::Unsupported));
+        } else {
+            assert!(matches!(outcome, MutationOutcome::Rejected));
+        }
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn loopback_harness_exercises_chunked_oversize_and_apply_close_modes() {
     let (endpoint, _) = start_server_cases(vec![TestResponse {
         status: 200,

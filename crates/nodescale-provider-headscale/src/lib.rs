@@ -11,8 +11,8 @@ use nodescale_provider::{
     MutableIdentityEvidence, MutationAmbiguity, MutationEvidence, MutationOutcome,
     MutationPolicyMode, MutationProvider, MutationTags, PreAuthAssociationStrength,
     PreAuthCorrelationObservation, ProviderCapability, ProviderError, ProviderHealth,
-    ProviderHealthStatus, ProviderIdentityEvidence, ProviderMutation, ProviderNode,
-    ProviderUserObservation, ReadOnlyProvider, ServerInspection,
+    ProviderHealthStatus, ProviderIdentityEvidence, ProviderMutation, ProviderMutationCapability,
+    ProviderNode, ProviderUserObservation, ReadOnlyProvider, ServerInspection,
 };
 use reqwest::{Client, StatusCode, Url};
 use semver::Version;
@@ -825,7 +825,33 @@ impl<A> HeadscaleMutationProvider<A> {
         })
     }
 
-    pub async fn inspect_policy(&self) -> Result<HeadscalePolicySnapshot, MutationOutcome> {
+    pub async fn inspect_policy(
+        &self,
+        authorization: A,
+    ) -> Result<HeadscalePolicySnapshot, MutationOutcome>
+    where
+        A: HeadscaleMutationAuthorization,
+    {
+        if !matches!(self.transport.policy_mode, MutationPolicyMode::Database) {
+            return Err(MutationOutcome::Unsupported);
+        }
+        if authorization
+            .validate_for_headscale(HeadscaleMutationAuthorizationContext {
+                network_id: self.transport.network_id,
+                provider_instance_id: self.inner.instance_id,
+                authorization_generation: self.transport.authorization_generation,
+                configuration_generation: self.transport.configuration_generation,
+                configuration_fingerprint: self.transport.configuration_fingerprint.clone(),
+                version: "v0.29.3".into(),
+                dirty: false,
+                capability: ProviderMutationCapability::ManagePolicy,
+                policy_mode: self.transport.policy_mode,
+                now: Utc::now(),
+            })
+            .is_err()
+        {
+            return Err(MutationOutcome::Rejected);
+        }
         self.readiness().await?;
         let policy = self.policy().await?.policy;
         Ok(HeadscalePolicySnapshot {
