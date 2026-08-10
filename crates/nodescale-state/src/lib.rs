@@ -161,6 +161,17 @@ impl HeadscaleImportConfig {
         self.custom_root_ca_sha256 = Some(fingerprint);
         Ok(self)
     }
+
+    fn validate_for_persistence(&self) -> Result<(), StateError> {
+        Self::new(
+            &self.server_url,
+            self.provider_instance_id,
+            &self.opaque_secret_reference,
+            &self.compatibility_pin,
+            self.tls_verification,
+        )?;
+        Ok(())
+    }
 }
 
 /// Persistable Tailscale SaaS import configuration. The token is deliberately
@@ -1896,6 +1907,7 @@ impl StateStore {
         snapshot_at: DateTime<Utc>,
         actor: AuditActor,
     ) -> Result<(), ReconciliationFailure> {
+        config.validate_for_persistence()?;
         if network.provider_kind != ProviderKind::Headscale
             || network.provider_instance_id != config.provider_instance_id
             || provider.instance_id() != config.provider_instance_id
