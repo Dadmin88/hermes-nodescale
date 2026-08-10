@@ -150,9 +150,13 @@ fn binding_revocation_and_projection_transitions_are_explicit() {
 #[test]
 fn secret_values_are_redacted() {
     let secret = InvitationSecret::new("invite-plaintext".to_owned()).unwrap();
+    let verifier = secret.verifier();
+    let verifier_with_fresh_salt = secret.verifier();
     assert_eq!(format!("{secret:?}"), "InvitationSecret([REDACTED])");
     assert_eq!(format!("{secret}"), "[REDACTED]");
-    assert_ne!(secret.verifier().as_str(), "invite-plaintext");
+    assert!(verifier.as_str().starts_with("$argon2id$"));
+    assert_ne!(verifier.as_str(), verifier_with_fresh_salt.as_str());
+    assert_ne!(verifier.as_str(), "invite-plaintext");
 }
 
 #[test]

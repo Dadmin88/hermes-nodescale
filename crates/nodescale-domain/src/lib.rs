@@ -13,7 +13,6 @@ use base64::{
 use chrono::{DateTime, Utc};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt, str::FromStr};
 use thiserror::Error;
 use uuid::Uuid;
@@ -1179,6 +1178,7 @@ const N4_ARGON_MEMORY_KIB: u32 = 19_456;
 const N4_ARGON_TIME_COST: u32 = 2;
 const N4_ARGON_PARALLELISM: u32 = 1;
 const N4_ARGON_OUTPUT_LEN: usize = 32;
+const LEGACY_INVITATION_ARGON_TIME_COST: u32 = 3;
 const INVITATION_TOKEN_PREFIX: &str = "nsjoin_";
 const INVITATION_TOKEN_BYTES: usize = 48;
 const INVITATION_TOKEN_ENCODED_LEN: usize = 64;
@@ -1406,11 +1406,14 @@ impl<'de> Deserialize<'de> for SecretVerifier {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if validate_n4_verifier(&value).is_ok() || is_legacy_sha256_verifier(&value) {
+        if validate_n4_verifier(&value).is_ok()
+            || validate_legacy_invitation_verifier(&value).is_ok()
+            || is_legacy_sha256_verifier(&value)
+        {
             Ok(Self(value))
         } else {
             Err(serde::de::Error::custom(
-                "secret verifier must be a fixed N4 Argon2id PHC or legacy SHA-256 digest",
+                "secret verifier must be an approved Argon2id PHC or legacy SHA-256 digest",
             ))
         }
     }
@@ -1418,23 +1421,36 @@ impl<'de> Deserialize<'de> for SecretVerifier {
 impl SecretVerifier {
     /// Builds an Argon2id PHC verifier using a fresh random salt for this record.
     pub fn from_token(token: &InvitationToken) -> Result<Self, DomainError> {
-        token.with_secret(Self::from_secret)
+        token.with_secret(|secret| Self::from_secret(secret))
     }
 
     /// Builds a verifier for an N5 local-owner trust-root capability.
     pub fn from_trust_root_token(token: &OwnerTrustRootToken) -> Result<Self, DomainError> {
-        token.with_secret(Self::from_secret)
+        token.with_secret(|secret| Self::from_secret(secret))
     }
 
-    fn from_secret(secret: &[u8; N4_ARGON_OUTPUT_LEN]) -> Result<Self, DomainError> {
-        let params = n4_argon_params()?;
+    fn from_secret(secret: &[u8]) -> Result<Self, DomainError> {
+        Self::from_secret_with_time_cost(secret, N4_ARGON_TIME_COST)
+    }
+
+    fn from_legacy_invitation_secret(secret: &[u8]) -> Result<Self, DomainError> {
+        Self::from_secret_with_time_cost(secret, LEGACY_INVITATION_ARGON_TIME_COST)
+    }
+
+    fn from_secret_with_time_cost(secret: &[u8], time_cost: u32) -> Result<Self, DomainError> {
+        let params = argon_params(time_cost)?;
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let salt = SaltString::generate(&mut OsRng);
         let phc = argon
             .hash_password(secret, &salt)
             .map_err(|_| invalid_verifier())?
             .to_string();
-        Self::parse(phc)
+        if time_cost == N4_ARGON_TIME_COST {
+            Self::parse(phc)
+        } else {
+            validate_legacy_invitation_verifier(&phc)?;
+            Ok(Self(phc))
+        }
     }
 
     /// Validates a stored N4 Argon2id PHC verifier before accepting persistence.
@@ -1467,10 +1483,6 @@ impl SecretVerifier {
     fn is_n4(&self) -> bool {
         validate_n4_verifier(&self.0).is_ok()
     }
-
-    fn legacy_sha256(value: String) -> Self {
-        Self(value)
-    }
 }
 impl fmt::Debug for SecretVerifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1483,14 +1495,31 @@ impl fmt::Display for SecretVerifier {
     }
 }
 
-fn n4_argon_params() -> Result<Params, DomainError> {
+fn argon_params(time_cost: u32) -> Result<Params, DomainError> {
     Params::new(
         N4_ARGON_MEMORY_KIB,
-        N4_ARGON_TIME_COST,
+        time_cost,
         N4_ARGON_PARALLELISM,
         Some(N4_ARGON_OUTPUT_LEN),
     )
     .map_err(|_| invalid_verifier())
+}
+
+fn validate_legacy_invitation_verifier(value: &str) -> Result<PasswordHash<'_>, DomainError> {
+    let parsed = PasswordHash::new(value).map_err(|_| invalid_verifier())?;
+    let correct_profile = parsed.algorithm.as_str() == "argon2id"
+        && parsed.version == Some(0x13)
+        && parsed.params.get_decimal("m") == Some(N4_ARGON_MEMORY_KIB)
+        && parsed.params.get_decimal("t") == Some(LEGACY_INVITATION_ARGON_TIME_COST)
+        && parsed.params.get_decimal("p") == Some(N4_ARGON_PARALLELISM)
+        && parsed
+            .hash
+            .is_some_and(|hash| hash.as_bytes().len() == N4_ARGON_OUTPUT_LEN);
+    if correct_profile {
+        Ok(parsed)
+    } else {
+        Err(invalid_verifier())
+    }
 }
 
 fn validate_n4_verifier(value: &str) -> Result<PasswordHash<'_>, DomainError> {
@@ -1535,7 +1564,7 @@ impl fmt::Display for InvitationSecret {
     }
 }
 
-/// Legacy N0-N3 compatibility only. It cannot be used by `Invitation::new_n4`.
+/// Legacy N0-N3 secret input. New issuance should use `InvitationToken`.
 #[derive(Clone)]
 pub struct InvitationSecret(String);
 impl InvitationSecret {
@@ -1550,8 +1579,8 @@ impl InvitationSecret {
     }
     #[must_use]
     pub fn verifier(&self) -> SecretVerifier {
-        let digest = Sha256::digest(self.0.as_bytes());
-        SecretVerifier::legacy_sha256(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        SecretVerifier::from_legacy_invitation_secret(self.0.as_bytes())
+            .expect("the fixed Argon2id verifier profile is valid")
     }
     #[must_use]
     pub fn expose_for_delivery(&self) -> &str {
