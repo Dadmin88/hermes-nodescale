@@ -23,6 +23,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 const MAX_CHALLENGE_TTL_SECONDS: i64 = 600;
+const ACTOR_MAILBOX_CAPACITY: usize = 128;
 
 pub trait N6Clock: Send + Sync + 'static {
     fn now(&self) -> DateTime<Utc>;
@@ -108,17 +109,16 @@ enum ActorCommand {
         now: DateTime<Utc>,
         reply: oneshot::Sender<Result<N6BindingView, N6ProductionError>>,
     },
-    Shutdown,
 }
 
 struct ActorClient {
-    sender: mpsc::UnboundedSender<ActorCommand>,
+    sender: Option<mpsc::Sender<ActorCommand>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for ActorClient {
     fn drop(&mut self) {
-        let _ = self.sender.send(ActorCommand::Shutdown);
+        self.sender.take();
         if let Ok(thread) = self.thread.get_mut()
             && let Some(thread) = thread.take()
         {
@@ -158,7 +158,7 @@ impl<C: N6Clock> N6BindingService<C> {
         {
             return Err(N6ProductionError::Rejected);
         }
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
         let thread = std::thread::Builder::new()
             .name("nodescale-n6-binding".into())
             .spawn(move || {
@@ -276,7 +276,6 @@ impl<C: N6Clock> N6BindingService<C> {
                                     .map_err(classify_state_error);
                                 let _ = reply.send(result);
                             }
-                            ActorCommand::Shutdown => break,
                         }
                     }
                 });
@@ -284,7 +283,7 @@ impl<C: N6Clock> N6BindingService<C> {
             .map_err(|_| N6ProductionError::Internal)?;
         Ok(Self {
             actor: Arc::new(ActorClient {
-                sender,
+                sender: Some(sender),
                 thread: Mutex::new(Some(thread)),
             }),
             clock,
@@ -305,6 +304,8 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::Issue {
                 authenticated_peer,
                 operation_id,
@@ -316,6 +317,7 @@ impl<C: N6Clock> N6BindingService<C> {
                 expires_at: now + self.challenge_ttl,
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
@@ -328,12 +330,15 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::Confirm {
                 authenticated_peer,
                 request,
                 now: self.clock.now(),
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
@@ -347,6 +352,8 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::Authorize {
                 network_id,
                 device_id,
@@ -354,6 +361,7 @@ impl<C: N6Clock> N6BindingService<C> {
                 now: self.clock.now(),
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
@@ -367,6 +375,8 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::GrantCapability {
                 root,
                 authority_id,
@@ -374,6 +384,7 @@ impl<C: N6Clock> N6BindingService<C> {
                 now: self.clock.now(),
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
@@ -389,6 +400,8 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::IssueAuthorization {
                 root,
                 authority_id,
@@ -398,6 +411,7 @@ impl<C: N6Clock> N6BindingService<C> {
                 now: self.clock.now(),
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
@@ -409,11 +423,14 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::Rotate {
                 intent,
                 now: self.clock.now(),
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
@@ -425,11 +442,14 @@ impl<C: N6Clock> N6BindingService<C> {
         let (reply, response) = oneshot::channel();
         self.actor
             .sender
+            .as_ref()
+            .ok_or(N6ProductionError::Internal)?
             .send(ActorCommand::Revoke {
                 intent,
                 now: self.clock.now(),
                 reply,
             })
+            .await
             .map_err(|_| N6ProductionError::Internal)?;
         response.await.map_err(|_| N6ProductionError::Internal)?
     }
