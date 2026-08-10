@@ -71,7 +71,7 @@ fleet_socket = "/run/hermes-fleet/managed-projection.sock"
 poll_interval_seconds = 30
 network_id = "11111111-1111-1111-1111-111111111111"
 network_name = "Provider-neutral network"
-plaintext_token = "forbidden"
+unexpected_field = "forbidden"
 
 [provider]
 kind = "tailscale"

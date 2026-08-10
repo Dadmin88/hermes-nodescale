@@ -55,7 +55,6 @@ pub enum ProviderConfig {
 #[serde(rename_all = "snake_case")]
 pub enum TailscaleAuthMode {
     ApiAccessToken,
-    OAuthAccessToken,
 }
 
 #[derive(Debug, Error)]
@@ -260,13 +259,10 @@ pub fn build_provider(config: &ProviderConfig) -> Result<ProviderRuntime, Runtim
         ProviderConfig::Tailscale {
             tailnet,
             credential_reference,
-            auth,
+            auth: TailscaleAuthMode::ApiAccessToken,
             ..
         } => {
-            let auth = match auth {
-                TailscaleAuthMode::ApiAccessToken => TailscaleAuth::ApiAccessToken(api_key),
-                TailscaleAuthMode::OAuthAccessToken => TailscaleAuth::OAuthAccessToken(api_key),
-            };
+            let auth = TailscaleAuth::ApiAccessToken(api_key);
             let provider =
                 TailscaleProvider::new(tailnet, instance, auth, TailscaleClientOptions::default())
                     .map_err(|_| RuntimeError::ProviderConstruction)?;

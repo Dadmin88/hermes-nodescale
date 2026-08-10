@@ -27,6 +27,20 @@ The packaged unit uses:
 LoadCredential=provider-token
 ```
 
+## Installation contract
+
+The unit is a system service and deliberately assumes a dedicated `nodescale` account. Installation must create that account and place every referenced artifact before enabling the unit:
+
+```bash
+sudo useradd --system --home-dir /var/lib/nodescale --shell /usr/sbin/nologin nodescale
+sudo install -Dm0755 target/release/nodescale-runtime /usr/bin/nodescale-runtime
+sudo install -Dm0644 packaging/systemd/nodescale-runtime.service /etc/systemd/system/nodescale-runtime.service
+sudo install -d -m0700 -o nodescale -g nodescale /etc/nodescale
+sudo install -m0600 -o nodescale -g nodescale config/runtime.tailscale.example.toml /etc/nodescale/runtime.toml
+```
+
+Edit the installed config with owner-selected IDs and paths before service activation. The Fleet socket owner must separately allow the `nodescale` UID to connect and authenticate it through `SO_PEERCRED`; the unit does not weaken Fleet socket permissions. After provisioning the encrypted credential, run `systemd-analyze verify`, `systemctl daemon-reload`, enable/start the service, and require a successful bounded cycle in the journal. Do not enable the unit while example IDs or provider values remain.
+
 Provision the matching system credential with the host's supported `systemd-creds` workflow. For example, an administrator may run the following interactively and provide the secret on standard input:
 
 ```bash
@@ -42,7 +56,7 @@ Use one of:
 - `config/runtime.tailscale.example.toml`
 - `config/runtime.headscale.example.toml`
 
-The paths must be absolute. IDs must be stable UUIDs selected by the owner. Tailscale supports `api_access_token` and scoped `oauth_access_token` modes. The Tailscale adapter is deliberately read-only and advertises no mutation capabilities.
+The paths must be absolute. IDs must be stable UUIDs selected by the owner. The continuous runtime accepts Tailscale API access tokens. The adapter also supports a caller-managed OAuth access token for bounded library use, but the daemon does not advertise that mode because OAuth access tokens expire and it does not yet implement client-credential refresh. The Tailscale adapter is deliberately read-only and advertises no mutation capabilities.
 
 Run one bounded cycle for installation smoke testing:
 

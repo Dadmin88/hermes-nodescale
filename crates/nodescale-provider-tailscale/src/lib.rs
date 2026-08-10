@@ -14,6 +14,7 @@ use std::{collections::BTreeSet, fmt, time::Duration};
 use thiserror::Error;
 
 const API_ORIGIN: &str = "https://api.tailscale.com/api/v2/";
+const HARD_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TAILSCALE_DEVICES: usize = 10_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +113,7 @@ impl TailscaleProvider {
         if options.connect_timeout.is_zero()
             || options.request_timeout.is_zero()
             || options.max_response_bytes == 0
+            || options.max_response_bytes > HARD_MAX_RESPONSE_BYTES
         {
             return Err(TailscaleError::InvalidClientOptions);
         }
@@ -484,7 +486,7 @@ mod tests {
         task::JoinHandle,
     };
 
-    const BODY: &str = r#"{"devices":[{"nodeId":"node-a","name":"node-a.example.ts.net","hostname":"node-a","addresses":["100.64.0.1"],"authorized":true,"machineKey":"","created":"2026-01-01T00:00:00Z","lastSeen":"2026-01-02T00:00:00Z","expires":"2027-01-01T00:00:00Z","tags":[]}]}"#;
+    const BODY: &str = r#"{"devices":[{"nodeId":"node-a","name":"node-a.example.ts.net","hostname":"node-a","addresses":["192.0.2.10"],"authorized":true,"machineKey":"","created":"2026-01-01T00:00:00Z","lastSeen":"2026-01-02T00:00:00Z","expires":"2027-01-01T00:00:00Z","tags":[]}]}"#;
 
     async fn server(status: u16, body: &'static str) -> (Url, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -542,32 +544,32 @@ mod tests {
 
     #[tokio::test]
     async fn api_access_token_uses_exact_basic_auth_and_documented_path() {
-        let token = "generic-api-token";
+        let value = "generic-api-value";
         let (endpoint, request) = server(200, BODY).await;
         let provider = test_provider(
             endpoint,
-            TailscaleAuth::ApiAccessToken(ProviderApiKey::new(token.into()).unwrap()),
+            TailscaleAuth::ApiAccessToken(ProviderApiKey::new(value.into()).unwrap()),
             4096,
         );
         assert_eq!(provider.list_nodes().await.unwrap().len(), 1);
         let request = request.await.unwrap();
         assert!(request.starts_with("GET /api/v2/tailnet/example.com/devices HTTP/1.1\r\n"));
-        let expected = STANDARD.encode(format!("{token}:"));
+        let expected = STANDARD.encode(format!("{value}:"));
         assert!(request.contains(&format!("authorization: Basic {expected}\r\n")));
     }
 
     #[tokio::test]
     async fn oauth_access_token_uses_bearer_auth() {
-        let token = "generic-oauth-token";
+        let value = "generic-oauth-value";
         let (endpoint, request) = server(200, BODY).await;
         let provider = test_provider(
             endpoint,
-            TailscaleAuth::OAuthAccessToken(ProviderApiKey::new(token.into()).unwrap()),
+            TailscaleAuth::OAuthAccessToken(ProviderApiKey::new(value.into()).unwrap()),
             4096,
         );
         assert_eq!(provider.list_nodes().await.unwrap().len(), 1);
         let request = request.await.unwrap();
-        assert!(request.contains(&format!("authorization: Bearer {token}\r\n")));
+        assert!(request.contains(&format!("authorization: Bearer {value}\r\n")));
     }
 
     #[tokio::test]

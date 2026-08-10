@@ -2,8 +2,8 @@ use chrono::{TimeZone, Utc};
 use nodescale_domain::{ProviderApiKey, ProviderInstanceId};
 use nodescale_provider::{ProviderCapability, ProviderError};
 use nodescale_provider_tailscale::{
-    TailscaleAuth, TailscaleClientOptions, TailscaleProvider, parse_devices_fixture,
-    read_only_capabilities,
+    TailscaleAuth, TailscaleClientOptions, TailscaleError, TailscaleProvider,
+    parse_devices_fixture, read_only_capabilities,
 };
 use sha2::{Digest, Sha256};
 
@@ -18,7 +18,7 @@ fn device(node_id: &str, machine_key: &str, authorized: bool) -> String {
             "nodeId":"{node_id}",
             "name":"workstation.example.ts.net",
             "hostname":"workstation",
-            "addresses":["100.64.0.10","fd7a:115c:a1e0::10"],
+            "addresses":["192.0.2.100","fd7a:115c:a1e0::10"],
             "authorized":{authorized},
             "isExternal":false,
             "machineKey":"{machine_key}",
@@ -116,15 +116,29 @@ fn adapter_advertises_only_supported_read_operations_and_redacts_auth() {
         .collect()
     );
 
-    let token = "tskey-api-generic-fixture";
+    let value = "generic-secret-value";
     let provider = TailscaleProvider::new(
         "example.com",
         ProviderInstanceId::new(),
-        TailscaleAuth::ApiAccessToken(ProviderApiKey::new(token.to_owned()).unwrap()),
+        TailscaleAuth::ApiAccessToken(ProviderApiKey::new(value.into()).unwrap()),
         TailscaleClientOptions::default(),
     )
     .unwrap();
     let debug = format!("{provider:?}");
     assert!(debug.contains("[REDACTED]"));
-    assert!(!debug.contains(token));
+    assert!(!debug.contains(value));
+}
+
+#[test]
+fn response_limit_has_a_hard_public_ceiling() {
+    let result = TailscaleProvider::new(
+        "example.com",
+        ProviderInstanceId::new(),
+        TailscaleAuth::ApiAccessToken(ProviderApiKey::new("generic-token".into()).unwrap()),
+        TailscaleClientOptions {
+            max_response_bytes: 8 * 1024 * 1024 + 1,
+            ..TailscaleClientOptions::default()
+        },
+    );
+    assert!(matches!(result, Err(TailscaleError::InvalidClientOptions)));
 }

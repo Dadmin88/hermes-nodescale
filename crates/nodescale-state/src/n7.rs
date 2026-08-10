@@ -179,9 +179,15 @@ impl StateStore {
              FROM devices d
              JOIN n6_binding_records b
                ON b.network_id=d.network_id AND b.device_id=d.device_id
+             JOIN n5_provider_bindings p
+               ON p.network_id=d.network_id AND p.device_id=d.device_id
+             JOIN n5_device_trust_state t
+               ON t.network_id=d.network_id AND t.device_id=d.device_id
              WHERE d.network_id=?1
                AND d.membership_state='active'
                AND d.revoked_at IS NULL
+               AND p.binding_state='active'
+               AND t.trust_state='trusted'
                AND b.binding_state='active'
                AND b.verified_peer_id IS NOT NULL
              ORDER BY d.device_id

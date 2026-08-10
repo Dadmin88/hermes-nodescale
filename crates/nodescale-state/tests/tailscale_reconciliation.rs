@@ -92,7 +92,7 @@ fn node(instance: ProviderInstanceId) -> ProviderNode {
         },
         hostname: "workstation".into(),
         given_name: "workstation.example.ts.net".into(),
-        addresses: vec!["100.64.0.10".into()],
+        addresses: vec!["192.0.2.100".into()],
         user: None,
         pre_auth: None,
         tags: BTreeSet::from(["tag:worker".into()]),
