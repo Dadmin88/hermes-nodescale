@@ -14,6 +14,14 @@ Each bounded cycle:
 
 SIGTERM and SIGINT stop the current-thread poll loop cleanly. SQLite observations and sanitized import metadata survive restart. Provider observations do **not** create devices, trust, Keryx bindings, Fleet rows, or execution authority.
 
+## Optional same-UID observation socket
+
+The runtime has no observation socket unless configuration contains an explicit `[observation_api]` table. V1 is Linux Unix-domain-socket only: `socket_path` must be absolute and canonical, its direct parent must be owned by the runtime UID with mode `0700`, and `peer_uid` must exactly equal the runtime service effective UID. The owned socket is mode `0600`; group and cross-UID sharing are not supported. Startup refuses every pre-existing socket-path entry, including another active socket, rather than unlinking foreign state. Graceful shutdown removes only the exact socket inode created by that listener.
+
+The protocol version is `nodescale.observations.v1`. A client writes one big-endian u32 length-prefixed JSON request, then closes its write half. Closed request kinds are `capabilities`, `summary` with `network_id`, and `list` with `network_id`, bounded `limit`, and optional provider-node-ID `cursor`. Invalid, duplicate, unknown, truncated, trailing, or oversized input receives only a sanitized `invalid_request` result; valid requests that cannot read authoritative local state receive only `unavailable`. An unauthorized peer is closed before any body parsing. List responses never exceed the advertised 64 KiB frame bound; when a requested page must be shortened or may have more rows, `next_cursor` is the canonical provider-node ID of the last returned row. Paging is a current-state best-effort view, not an immutable event stream or frozen multi-page snapshot.
+
+Responses are explicitly projected durable current-state observations. They expose an opaque deterministic observation ID, provider/network identifiers, bounded display/network fields, provider liveness/timestamps/classification, and a separate reconciliation freshness summary. They never expose device IDs, fingerprints, provider user data, credential correlation, keys, secrets, audit/trust/readiness/operations state, or Fleet/N5/N6/N7 data. Reads never reconcile a provider or mutate Nodescale state.
+
 ## Deliberate N7 boundary
 
 The daemon does **not** automatically project to Fleet. The earlier automatic loop was removed because unchanged polls advanced projection generations and eligibility withdrawal could leave stale Fleet authority active.
@@ -61,7 +69,7 @@ sudo install -d -m0710 -o root -g nodescale /etc/nodescale
 sudo install -m0640 -o root -g nodescale config/runtime.tailscale.example.toml /etc/nodescale/runtime.toml
 ```
 
-The resulting configuration ownership is `root:nodescale`; the runtime account cannot rewrite its provider selection, identity, paths, or credential reference.
+The resulting configuration ownership is `root:nodescale`; the runtime account cannot rewrite its provider selection, identity, paths, or credential reference. The system unit leaves the API disabled because the installed example has no `[observation_api]` section. Do not add a socket path until the owner has selected a same-UID local consumer and a service-owned `0700` parent directory.
 
 Edit the installed config with owner-selected IDs before activation. Do not enable the unit while example values remain.
 

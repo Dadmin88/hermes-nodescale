@@ -260,6 +260,12 @@ pub struct ProviderObservation {
     pub snapshot_at: DateTime<Utc>,
 }
 
+/// Maximum number of durable observations returned by one read page.
+///
+/// This is deliberately fixed at the state boundary so every caller, including
+/// local transports, has the same bounded current-state read contract.
+pub const PROVIDER_OBSERVATION_PAGE_MAX: usize = 100;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderReconciliationState {
@@ -2194,6 +2200,47 @@ impl StateStore {
             .map(|entries| entries.into_values().collect())
     }
 
+    /// Return one deterministic, provider-node-ID ordered page of the durable
+    /// current observation inventory. This is a read-only best-effort view: it
+    /// neither reconciles a provider nor records an audit event.
+    pub fn provider_observation_page(
+        &self,
+        network_id: NetworkId,
+        after_provider_node_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ProviderObservation>, StateError> {
+        let limit = limit.min(PROVIDER_OBSERVATION_PAGE_MAX);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let network = self.network(network_id)?;
+        let observations = load_observation_page(
+            &self.connection.borrow(),
+            network_id,
+            after_provider_node_id,
+            limit,
+        )?;
+        let mut page = Vec::with_capacity(observations.len());
+        for observation in observations {
+            if observation.provider_instance_id != network.provider_instance_id
+                || observation.node.identity.provider_instance_id
+                    != observation.provider_instance_id
+                || observation.node.identity.node_id.to_string()
+                    != observation.canonical_provider_node_id
+                || !valid_sha256_fingerprint(&observation.stable_machine_key_fingerprint)
+                || observation.node.identity.stable_key_fingerprint
+                    != observation.stable_machine_key_fingerprint
+                || semantic_fingerprint(&observation.node)? != observation.semantic_fingerprint
+            {
+                return Err(StateError::Conflict(
+                    "provider observation identity is inconsistent".into(),
+                ));
+            }
+            page.push(observation);
+        }
+        Ok(page)
+    }
+
     pub fn device_count(&self, network_id: NetworkId) -> Result<u64, StateError> {
         self.count("devices", network_id)
     }
@@ -2617,76 +2664,117 @@ fn parse_classification(value: &str) -> Result<ObservationClassification, StateE
     }
 }
 
+type RawProviderObservation = (
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+fn read_raw_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawProviderObservation> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+    ))
+}
+
+fn decode_observation(
+    network_id: NetworkId,
+    row: RawProviderObservation,
+) -> Result<ProviderObservation, StateError> {
+    let (
+        device_id,
+        provider_instance_id,
+        provider_node_id,
+        fingerprint,
+        classification,
+        adoption_state,
+        semantic_fingerprint,
+        normalized_json,
+        first,
+        last,
+        snapshot,
+    ) = row;
+    let device_id = device_id
+        .map(|value| DeviceId::parse(&value))
+        .transpose()
+        .map_err(|error| StateError::Conflict(error.to_string()))?;
+    let provider_instance_id = ProviderInstanceId::parse(&provider_instance_id)
+        .map_err(|error| StateError::Conflict(error.to_string()))?;
+    let node = serde_json::from_str(&normalized_json)?;
+    let first_observed_at = first
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
+    let last_observed_at = last
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
+    let snapshot_at = snapshot
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
+    Ok(ProviderObservation {
+        network_id,
+        device_id,
+        provider_instance_id,
+        canonical_provider_node_id: provider_node_id,
+        stable_machine_key_fingerprint: fingerprint,
+        node,
+        classification: parse_classification(&classification)?,
+        adoption_state: parse_adoption_state(&adoption_state)?,
+        semantic_fingerprint,
+        first_observed_at,
+        last_observed_at,
+        snapshot_at,
+    })
+}
+
 fn load_observations(
     connection: &Connection,
     network_id: NetworkId,
 ) -> Result<BTreeMap<String, ProviderObservation>, StateError> {
     let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 ORDER BY provider_node_id")?;
-    let rows = statement.query_map([network_id.to_string()], |row| {
-        Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, String>(10)?,
-        ))
-    })?;
+    let rows = statement.query_map([network_id.to_string()], read_raw_observation)?;
     let mut observations = BTreeMap::new();
     for row in rows {
-        let (
-            device_id,
-            provider_instance_id,
-            provider_node_id,
-            fingerprint,
-            classification,
-            adoption_state,
-            semantic_fingerprint,
-            normalized_json,
-            first,
-            last,
-            snapshot,
-        ) = row?;
-        let device_id = device_id
-            .map(|value| DeviceId::parse(&value))
-            .transpose()
-            .map_err(|error| StateError::Conflict(error.to_string()))?;
-        let provider_instance_id = ProviderInstanceId::parse(&provider_instance_id)
-            .map_err(|error| StateError::Conflict(error.to_string()))?;
-        let node = serde_json::from_str(&normalized_json)?;
-        let first_observed_at = first
-            .parse::<DateTime<Utc>>()
-            .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
-        let last_observed_at = last
-            .parse::<DateTime<Utc>>()
-            .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
-        let snapshot_at = snapshot
-            .parse::<DateTime<Utc>>()
-            .map_err(|_| StateError::Conflict("invalid observation timestamp".into()))?;
-        observations.insert(
-            provider_node_id.clone(),
-            ProviderObservation {
-                network_id,
-                device_id,
-                provider_instance_id,
-                canonical_provider_node_id: provider_node_id,
-                stable_machine_key_fingerprint: fingerprint,
-                node,
-                classification: parse_classification(&classification)?,
-                adoption_state: parse_adoption_state(&adoption_state)?,
-                semantic_fingerprint,
-                first_observed_at,
-                last_observed_at,
-                snapshot_at,
-            },
-        );
+        let observation = decode_observation(network_id, row?)?;
+        observations.insert(observation.canonical_provider_node_id.clone(), observation);
     }
     Ok(observations)
+}
+
+fn load_observation_page(
+    connection: &Connection,
+    network_id: NetworkId,
+    after_provider_node_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ProviderObservation>, StateError> {
+    let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 AND (?2 IS NULL OR provider_node_id>?2) ORDER BY provider_node_id LIMIT ?3")?;
+    let rows = statement.query_map(
+        params![
+            network_id.to_string(),
+            after_provider_node_id,
+            i64::try_from(limit)
+                .map_err(|_| StateError::Conflict("observation page limit is invalid".into()))?
+        ],
+        read_raw_observation,
+    )?;
+    rows.map(|row| decode_observation(network_id, row?))
+        .collect()
 }
 
 fn validate_next(expected: Generation, next: Generation) -> Result<(), StateError> {

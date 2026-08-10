@@ -16,6 +16,7 @@ fn valid_config() -> RuntimeConfig {
             credential_reference: "secret://systemd/provider-token".into(),
             auth: TailscaleAuthMode::ApiAccessToken,
         },
+        observation_api: None,
     }
 }
 
