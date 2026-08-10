@@ -1,5 +1,8 @@
 use super::*;
-use nodescale_domain::{Generation, OperationId, ProjectionStatus};
+use nodescale_domain::{
+    Generation, KeryxBindingId, KeryxPeerId, OperationId, ProjectionStatus,
+    n7::{FleetGeneratedGrants, N6ActiveBindingProvenance, N7FleetDesiredProjection},
+};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 /// Exact authenticated N6 evidence that authorizes one Fleet projection.
@@ -155,6 +158,86 @@ pub enum N7ProjectionAttemptOutcome {
 }
 
 impl StateStore {
+    /// Reconstruct bounded canonical N7 desired projections exclusively from
+    /// state-owned active device and authenticated N6 binding rows.
+    pub fn n7_runtime_desired_projections(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<Vec<N7FleetDesiredProjection>, StateError> {
+        let connection = self.connection.borrow();
+        let network_record = connection
+            .query_row(
+                "SELECT record_json FROM networks WHERE network_id=?1",
+                [network_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
+        let network: Network = serde_json::from_str(&network_record)?;
+        let mut statement = connection.prepare(
+            "SELECT d.record_json,b.binding_id,b.verified_peer_id,b.generation
+             FROM devices d
+             JOIN n6_binding_records b
+               ON b.network_id=d.network_id AND b.device_id=d.device_id
+             WHERE d.network_id=?1
+               AND d.membership_state='active'
+               AND d.revoked_at IS NULL
+               AND b.binding_state='active'
+               AND b.verified_peer_id IS NOT NULL
+             ORDER BY d.device_id
+             LIMIT 257",
+        )?;
+        let rows = statement.query_map([network_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+            ))
+        })?;
+        let mut desired = Vec::new();
+        for row in rows {
+            let (device_record, binding_id, peer_id, binding_generation) = row?;
+            if desired.len() == 256 {
+                return Err(StateError::Conflict(
+                    "N7 runtime desired projection bound exceeded".into(),
+                ));
+            }
+            let device: Device = serde_json::from_str(&device_record)?;
+            let binding_id = KeryxBindingId::parse(&binding_id)
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            let peer_id = KeryxPeerId::parse(peer_id)
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            let binding_generation = Generation::new(binding_generation)
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            let provenance = N6ActiveBindingProvenance::from_verified_active_runtime_row(
+                network_id,
+                device.device_id,
+                binding_id,
+                peer_id,
+                binding_generation,
+            )
+            .map_err(|error| StateError::Conflict(error.to_string()))?;
+            let grants = FleetGeneratedGrants::new(network.baseline_operations.iter().copied())
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            desired.push(
+                N7FleetDesiredProjection::upsert_from_active_n6_provenance(
+                    network_id,
+                    device.device_id,
+                    device.display_name,
+                    device.membership_state,
+                    network.membership_generation,
+                    device.generations.fleet_projection,
+                    provenance,
+                    device.roles,
+                    grants,
+                )
+                .map_err(|error| StateError::Conflict(error.to_string()))?,
+            );
+        }
+        Ok(desired)
+    }
+
     /// Persists desired bytes and exact N6 binding provenance before any adapter
     /// dispatch. Reuse of an operation ID is valid only for the exact full tuple.
     pub fn reserve_n7_projection(

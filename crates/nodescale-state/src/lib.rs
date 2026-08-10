@@ -163,6 +163,64 @@ impl HeadscaleImportConfig {
     }
 }
 
+/// Persistable Tailscale SaaS import configuration. The token is deliberately
+/// excluded; only an opaque secret reference is durable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TailscaleImportConfig {
+    pub tailnet: String,
+    pub provider_instance_id: ProviderInstanceId,
+    pub opaque_secret_reference: String,
+    pub compatibility_pin: String,
+    pub read_only: bool,
+    pub mutation_allowed: bool,
+}
+
+impl TailscaleImportConfig {
+    pub fn new(
+        tailnet: impl Into<String>,
+        provider_instance_id: ProviderInstanceId,
+        opaque_secret_reference: impl Into<String>,
+    ) -> Result<Self, StateError> {
+        let tailnet = tailnet.into();
+        let opaque_secret_reference = opaque_secret_reference.into();
+        if tailnet.is_empty()
+            || tailnet.len() > 256
+            || tailnet.trim() != tailnet
+            || !tailnet
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-_@".contains(&byte))
+        {
+            return Err(StateError::Conflict("Tailscale tailnet is invalid".into()));
+        }
+        if !opaque_secret_reference.starts_with("secret://")
+            || opaque_secret_reference.len() > 255
+            || opaque_secret_reference.chars().any(char::is_whitespace)
+        {
+            return Err(StateError::Conflict(
+                "credential must be an opaque secret:// reference, not plaintext".into(),
+            ));
+        }
+        Ok(Self {
+            tailnet,
+            provider_instance_id,
+            opaque_secret_reference,
+            compatibility_pin: "api-v2".into(),
+            read_only: true,
+            mutation_allowed: false,
+        })
+    }
+
+    fn scoped_api_url(&self) -> String {
+        format!("https://api.tailscale.com/api/v2/tailnet/{}", self.tailnet)
+    }
+}
+
+struct ReconciliationImportConfig {
+    provider_instance_id: ProviderInstanceId,
+    provider_name: &'static str,
+    compatibility_pin: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationClassification {
@@ -1884,6 +1942,73 @@ impl StateStore {
         Ok(())
     }
 
+    /// Import one configured Tailscale SaaS provider as read-only observations.
+    /// Provider membership never creates a Nodescale device or Fleet authority.
+    pub async fn import_tailscale_network(
+        &self,
+        network: &Network,
+        config: &TailscaleImportConfig,
+        provider: &dyn ReadOnlyProvider,
+        snapshot_at: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<(), ReconciliationFailure> {
+        if network.provider_kind != ProviderKind::Tailscale
+            || network.provider_instance_id != config.provider_instance_id
+            || provider.instance_id() != config.provider_instance_id
+            || !config.read_only
+            || config.mutation_allowed
+        {
+            return Err(ReconciliationFailure::Incompatible);
+        }
+        let inspection = provider
+            .inspect_server()
+            .await
+            .map_err(map_provider_failure)?;
+        validate_read_only_inspection(
+            &inspection,
+            config.provider_instance_id,
+            "tailscale",
+            &config.compatibility_pin,
+        )?;
+        let nodes = provider.list_nodes().await.map_err(map_provider_failure)?;
+        let nodes = validate_snapshot(nodes, config.provider_instance_id)?;
+        self.transactional(|tx, store| {
+            let record = serde_json::to_string(network)?;
+            tx.execute("INSERT INTO networks (network_id,name,state,provider_kind,provider_instance_id,membership_generation,policy_generation,record_json,created_at,updated_at) VALUES (?1,?2,?3,'tailscale',?4,?5,?6,?7,?8,?9)", params![network.network_id.to_string(), network.name, lower(network.state.as_str()), network.provider_instance_id.to_string(), to_i64(network.membership_generation)?, to_i64(network.policy_generation)?, record, network.created_at.to_rfc3339(), network.updated_at.to_rfc3339()]).map_err(map_constraint)?;
+            tx.execute("INSERT INTO membership_generations (network_id,generation,updated_at) VALUES (?1,?2,?3)", params![network.network_id.to_string(), to_i64(network.membership_generation)?, network.updated_at.to_rfc3339()]).map_err(map_constraint)?;
+            tx.execute("INSERT INTO provider_imports (network_id,provider_instance_id,server_url,opaque_secret_reference,compatibility_pin,custom_root_ca_sha256,tls_verification,read_only,mutation_allowed,compatibility,provider_version,last_success_at,last_attempt_at) VALUES (?1,?2,?3,?4,?5,NULL,'verify',1,0,?6,?7,?8,?8)", params![network.network_id.to_string(), config.provider_instance_id.to_string(), config.scoped_api_url(), config.opaque_secret_reference, config.compatibility_pin, compatibility_name(inspection.compatibility), inspection.provider_version, snapshot_at.to_rfc3339()]).map_err(map_constraint)?;
+            store.append_audit(tx, Some(network.network_id), None, actor.clone(), "network_imported", "success", Some(network.membership_generation), &SanitizedMetadata::empty())?;
+            store.append_audit(tx, Some(network.network_id), None, actor.clone(), "provider_reconciliation_started", "success", None, &SanitizedMetadata::empty())?;
+            for node in &nodes {
+                let classification = if node.expired {
+                    ObservationClassification::ProviderExpired
+                } else {
+                    ObservationClassification::DiscoveredUnmanaged
+                };
+                insert_new_observation(
+                    tx,
+                    network.network_id,
+                    config.provider_instance_id,
+                    node,
+                    classification,
+                    snapshot_at,
+                )?;
+                store.append_audit(
+                    tx,
+                    Some(network.network_id),
+                    None,
+                    actor.clone(),
+                    if node.expired { "provider_node_expired" } else { "provider_node_discovered" },
+                    "success",
+                    None,
+                    &SanitizedMetadata::empty(),
+                )?;
+            }
+            store.append_audit(tx, Some(network.network_id), None, actor, "provider_reconciliation_completed", "success", None, &SanitizedMetadata::empty())
+        })?;
+        Ok(())
+    }
+
     /// Apply a complete successful snapshot. No device is created or activated;
     /// provider observations remain untrusted evidence.
     pub async fn reconcile_read_only(
@@ -1893,7 +2018,8 @@ impl StateStore {
         snapshot_at: DateTime<Utc>,
         actor: AuditActor,
     ) -> Result<ReconciliationReport, ReconciliationFailure> {
-        let (configured_instance, config) = self.import_config(network_id)?;
+        let config = self.reconciliation_import_config(network_id)?;
+        let configured_instance = config.provider_instance_id;
         if provider.instance_id() != configured_instance {
             self.record_provider_failure(
                 network_id,
@@ -1912,7 +2038,12 @@ impl StateStore {
                 return Err(failure);
             }
         };
-        if let Err(failure) = validate_inspection(&inspection, &config) {
+        if let Err(failure) = validate_read_only_inspection(
+            &inspection,
+            config.provider_instance_id,
+            config.provider_name,
+            &config.compatibility_pin,
+        ) {
             self.record_failure_for(network_id, snapshot_at, &failure, actor.clone())?;
             return Err(failure);
         }
@@ -2094,6 +2225,55 @@ impl StateStore {
             }
         }
         Ok(output)
+    }
+
+    fn reconciliation_import_config(
+        &self,
+        network_id: NetworkId,
+    ) -> Result<ReconciliationImportConfig, StateError> {
+        let row = self
+            .connection
+            .borrow()
+            .query_row(
+                "SELECT pi.provider_instance_id,n.provider_kind,pi.compatibility_pin,
+                        pi.read_only,pi.mutation_allowed
+                 FROM provider_imports pi
+                 JOIN networks n ON n.network_id=pi.network_id
+                 WHERE pi.network_id=?1",
+                [network_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StateError::NotFound(network_id.to_string()))?;
+        let provider_instance_id = ProviderInstanceId::parse(&row.0)
+            .map_err(|error| StateError::Conflict(error.to_string()))?;
+        if !row.3 || row.4 {
+            return Err(StateError::Conflict(
+                "persisted provider import is not read-only".into(),
+            ));
+        }
+        let provider_name = match row.1.as_str() {
+            "headscale" => "headscale",
+            "tailscale" => "tailscale",
+            _ => {
+                return Err(StateError::Conflict(
+                    "unsupported persisted provider kind".into(),
+                ));
+            }
+        };
+        Ok(ReconciliationImportConfig {
+            provider_instance_id,
+            provider_name,
+            compatibility_pin: row.2,
+        })
     }
 
     fn import_config(
@@ -2302,15 +2482,29 @@ fn validate_inspection(
     inspection: &ServerInspection,
     config: &HeadscaleImportConfig,
 ) -> Result<(), ReconciliationFailure> {
-    if inspection.provider_name != "headscale"
-        || inspection.instance_id != config.provider_instance_id
+    validate_read_only_inspection(
+        inspection,
+        config.provider_instance_id,
+        "headscale",
+        &config.compatibility_pin,
+    )
+}
+
+fn validate_read_only_inspection(
+    inspection: &ServerInspection,
+    provider_instance_id: ProviderInstanceId,
+    provider_name: &str,
+    compatibility_pin: &str,
+) -> Result<(), ReconciliationFailure> {
+    if inspection.provider_name != provider_name
+        || inspection.instance_id != provider_instance_id
         || inspection.mutation_allowed
         || !matches!(
             inspection.compatibility,
             CompatibilityStatus::Compatible | CompatibilityStatus::CompatibleWithConstraints
         )
         || inspection.provider_version.trim_start_matches('v')
-            != config.compatibility_pin.trim_start_matches('v')
+            != compatibility_pin.trim_start_matches('v')
     {
         return Err(ReconciliationFailure::Incompatible);
     }

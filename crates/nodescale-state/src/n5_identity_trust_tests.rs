@@ -110,7 +110,7 @@ fn provider_node(
         )
         .unwrap(),
         identity_evidence: ProviderIdentityEvidence {
-            machine_key: ConditionalIdentityEvidence::new(machine_key).unwrap(),
+            machine_key: Some(ConditionalIdentityEvidence::new(machine_key).unwrap()),
             node_key: None,
             disco_key: None,
         },
@@ -127,7 +127,7 @@ fn provider_node(
         last_seen: Some(now()),
         expires_at: None,
         observed_at: now() + Duration::milliseconds(1),
-        online: true,
+        online: Some(true),
         expired: false,
     }
 }

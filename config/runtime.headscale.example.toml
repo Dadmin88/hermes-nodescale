@@ -1,0 +1,13 @@
+# Example only: replace the generic IDs, origin, and version pin.
+state_path = "/var/lib/nodescale/state.sqlite3"
+fleet_socket = "/run/hermes-fleet/managed-projection.sock"
+poll_interval_seconds = 30
+network_id = "11111111-1111-1111-1111-111111111111"
+network_name = "Headscale network"
+
+[provider]
+kind = "headscale"
+provider_instance_id = "22222222-2222-2222-2222-222222222222"
+server_url = "https://headscale.example.com"
+compatibility_pin = "v0.29.3"
+credential_reference = "secret://systemd/provider-token"

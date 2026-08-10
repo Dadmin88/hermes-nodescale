@@ -30,7 +30,7 @@ fn selected_version_nodes_normalize_strong_identity_and_metadata() {
     let node = &nodes[0];
     assert_eq!(node.identity.node_id.as_str(), "42");
     assert_eq!(
-        node.identity_evidence.machine_key.class(),
+        node.identity_evidence.machine_key.as_ref().unwrap().class(),
         IdentityEvidenceClass::StableConditional
     );
     assert_eq!(
@@ -47,6 +47,24 @@ fn selected_version_nodes_normalize_strong_identity_and_metadata() {
         PreAuthAssociationStrength::ProviderAuthenticatedRegistration
     );
     assert_eq!(node.pre_auth.as_ref().unwrap().credential_id, "9");
+}
+
+#[test]
+fn headscale_online_presence_is_preserved() {
+    for (online_json, expected) in [
+        (None, None),
+        (Some("false"), Some(false)),
+        (Some("true"), Some(true)),
+    ] {
+        let online = online_json
+            .map(|value| format!(r#","online":{value}"#))
+            .unwrap_or_default();
+        let fixture =
+            format!(r#"{{"nodes":[{{"id":"42","machineKey":"mkey:synthetic"{online}}}]}}"#);
+        let nodes = parse_nodes_fixture(&fixture, instance(), fixed_now()).unwrap();
+        assert!(nodes[0].identity_evidence.machine_key.is_some());
+        assert_eq!(nodes[0].online, expected);
+    }
 }
 
 #[test]

@@ -1703,8 +1703,7 @@ struct RawNode {
     created_at: Option<DateTime<Utc>>,
     last_seen: Option<DateTime<Utc>>,
     expiry: Option<DateTime<Utc>>,
-    #[serde(default)]
-    online: bool,
+    online: Option<bool>,
     #[serde(default)]
     tags: BTreeSet<String>,
 }
@@ -1817,7 +1816,7 @@ fn normalize_node(
     Ok(ProviderNode {
         identity,
         identity_evidence: ProviderIdentityEvidence {
-            machine_key,
+            machine_key: Some(machine_key),
             node_key,
             disco_key,
         },

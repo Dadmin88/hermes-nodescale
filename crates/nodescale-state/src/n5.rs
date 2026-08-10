@@ -1136,10 +1136,16 @@ impl StateStore {
                 })
                 && node.expires_at.is_none_or(|expires_at| expires_at > now)
                 && !node.expired
-                && format!(
-                    "sha256:{:x}",
-                    Sha256::digest(node.identity_evidence.machine_key.as_str().as_bytes())
-                ) == binding.provider_identity.stable_key_fingerprint
+                && node
+                    .identity_evidence
+                    .machine_key
+                    .as_ref()
+                    .is_some_and(|machine_key| {
+                        format!(
+                            "sha256:{:x}",
+                            Sha256::digest(machine_key.as_str().as_bytes())
+                        ) == binding.provider_identity.stable_key_fingerprint
+                    })
         });
         if remains_exact {
             let mut provider_fresh_view = view;
@@ -1250,13 +1256,19 @@ fn validate_n5_provider_registration(
             && association.association
                 == PreAuthAssociationStrength::ProviderAuthenticatedRegistration
     });
-    let fingerprint = format!(
-        "sha256:{:x}",
-        Sha256::digest(node.identity_evidence.machine_key.as_str().as_bytes())
-    );
+    let machine_key_matches =
+        node.identity_evidence
+            .machine_key
+            .as_ref()
+            .is_some_and(|machine_key| {
+                format!(
+                    "sha256:{:x}",
+                    Sha256::digest(machine_key.as_str().as_bytes())
+                ) == node.identity.stable_key_fingerprint
+            });
     if !association_matches
         || node.identity.provider_instance_id != context.provider_instance_id
-        || node.identity.stable_key_fingerprint != fingerprint
+        || !machine_key_matches
         || node.expired
         || node.expires_at.is_some_and(|expiry| now >= expiry)
     {

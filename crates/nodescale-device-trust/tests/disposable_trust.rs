@@ -512,7 +512,12 @@ async fn disposable_join_confirms_identity_activates_revokes_and_cleans_up() {
     assert!(!fresh_revoked.currently_trusted);
     assert_secret_absent_from_state_files(
         &state_path,
-        joined.identity_evidence.machine_key.as_str(),
+        joined
+            .identity_evidence
+            .machine_key
+            .as_ref()
+            .unwrap()
+            .as_str(),
     );
     write_new(&canonical_root.join("trust-revoked"), b"revoked\n", 0o600);
     write_new(&canonical_root.join("node-observed"), b"observed\n", 0o600);
