@@ -94,6 +94,7 @@ FOR EACH ROW WHEN NOT (
         AND EXISTS (SELECT 1 FROM n7_fleet_projection_attempts a WHERE a.attempt_id=NEW.current_attempt_id AND a.projection_id=NEW.projection_id AND a.operation_id IN (SELECT operation_id FROM n7_fleet_projection_operations WHERE projection_id=NEW.projection_id)))
     OR (OLD.projection_state='attempted' AND OLD.revision=2 AND NEW.projection_state='attempted' AND NEW.revision=2
         AND NEW.current_attempt_id<>OLD.current_attempt_id
+        AND EXISTS (SELECT 1 FROM n6_binding_records b WHERE b.binding_id=NEW.binding_id AND b.network_id=NEW.network_id AND b.device_id=NEW.device_id AND b.verified_peer_id=NEW.authenticated_peer_id AND b.generation=NEW.binding_generation AND b.binding_state='active')
         AND EXISTS (SELECT 1 FROM n7_fleet_projection_attempts a WHERE a.attempt_id=NEW.current_attempt_id AND a.projection_id=NEW.projection_id AND a.attempt_number=(SELECT MAX(attempt_number) FROM n7_fleet_projection_attempts WHERE projection_id=NEW.projection_id)))
     OR (OLD.projection_state='attempted' AND OLD.revision=2 AND NEW.projection_state IN ('applied','conflict') AND NEW.revision=3 AND NEW.current_attempt_id=OLD.current_attempt_id
         AND EXISTS (SELECT 1 FROM n7_fleet_projection_inspections i JOIN n7_fleet_projection_attempts a ON a.attempt_id=i.attempt_id WHERE i.projection_id=NEW.projection_id AND i.attempt_id=NEW.current_attempt_id AND i.operation_id=a.operation_id AND i.expected_revision=OLD.revision AND i.inspection_kind='observed'
