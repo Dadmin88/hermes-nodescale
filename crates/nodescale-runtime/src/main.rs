@@ -1,4 +1,6 @@
-use nodescale_runtime::{RuntimeConfig, RuntimeError, build_provider, poll_interval, run_cycle};
+use nodescale_runtime::{
+    ObservationUdsListener, RuntimeConfig, RuntimeError, build_provider, poll_interval, run_cycle,
+};
 use nodescale_state::StateStore;
 use std::{env, path::PathBuf};
 use tokio::{
@@ -52,6 +54,13 @@ async fn main() -> Result<(), RuntimeError> {
         return Ok(());
     }
 
+    let observation_listener = config
+        .observation_api
+        .as_ref()
+        .map(ObservationUdsListener::bind)
+        .transpose()?;
+    let mut api_ticker = time::interval(std::time::Duration::from_millis(50));
+    api_ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut ticker = time::interval(poll_interval(&config));
     ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut terminate = signal(SignalKind::terminate())
@@ -61,6 +70,13 @@ async fn main() -> Result<(), RuntimeError> {
 
     loop {
         tokio::select! {
+            _ = api_ticker.tick(), if observation_listener.is_some() => {
+                if let Some(listener) = observation_listener.as_ref() {
+                    if let Err(error) = listener.serve_available(&store) {
+                        eprintln!("nodescale observation API accept failed: {error}");
+                    }
+                }
+            }
             _ = ticker.tick() => {
                 match run_cycle(&store, &config, &provider).await {
                     Ok(outcome) => eprintln!(

@@ -1,5 +1,8 @@
 //! Minimal restart-safe Nodescale provider observation reconciliation runtime.
 
+mod observation_uds;
+pub use observation_uds::{ObservationApiConfig, ObservationUdsListener};
+
 use chrono::Utc;
 use nodescale_domain::{
     AuditActor, Network, NetworkId, ProviderApiKey, ProviderInstanceId, ProviderKind,
@@ -31,6 +34,8 @@ pub struct RuntimeConfig {
     pub network_id: String,
     pub network_name: String,
     pub provider: ProviderConfig,
+    #[serde(default)]
+    pub observation_api: Option<ObservationApiConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -102,7 +107,11 @@ impl RuntimeConfig {
         {
             return Err(RuntimeError::Configuration("network_name is invalid"));
         }
-        self.provider.validate()
+        self.provider.validate()?;
+        if let Some(api) = &self.observation_api {
+            api.validate()?;
+        }
+        Ok(())
     }
 
     pub fn network_id(&self) -> Result<NetworkId, RuntimeError> {
