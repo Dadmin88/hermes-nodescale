@@ -498,12 +498,20 @@ impl StateStore {
                 params![evidence.join_session_id.to_string(), device_id.to_string(), serde_json::to_string(&session)?, confirmed_at.to_rfc3339()],
             )?;
             tx.execute(
-                "INSERT INTO n5_device_identities (device_id,network_id,origin_join_session_id,confirmed_at_ms,identity_revision,safe_correlation_digest) VALUES (?1,?2,?3,?4,1,?5)",
+                "INSERT INTO n5_device_identities (device_id,network_id,identity_origin_kind,identity_origin_id,n4_origin_id,adoption_origin_id,confirmed_at_ms,identity_revision,safe_correlation_digest) VALUES (?1,?2,'n4_join_session',?3,?3,NULL,?4,1,?5)",
                 params![device_id.to_string(), network_id.to_string(), evidence.join_session_id.to_string(), confirmed_at.timestamp_millis(), correlation],
             )?;
             tx.execute(
-                "INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,join_session_id,credential_id,provider_credential_reference,provider_instance_id,provider_node_id,machine_key_fingerprint,binding_state,binding_revision,observed_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'active',1,?10)",
-                params![binding_id.to_string(), device_id.to_string(), network_id.to_string(), evidence.join_session_id.to_string(), provenance.2, evidence.provider_reference.as_str(), provider_instance_id.to_string(), evidence.provider_identity.node_id.as_str(), evidence.provider_identity.stable_key_fingerprint, evidence.observed_at.timestamp_millis()],
+                "INSERT INTO n5_n4_identity_origins (origin_id,origin_kind,device_id,network_id,join_session_id) VALUES (?1,'n4_join_session',?2,?3,?1)",
+                params![evidence.join_session_id.to_string(), device_id.to_string(), network_id.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,provenance_kind,n4_provenance_binding_id,adoption_provenance_binding_id,provider_instance_id,provider_node_id,machine_key_fingerprint,binding_state,binding_revision,observed_at_ms) VALUES (?1,?2,?3,'n4_join_session',?1,NULL,?4,?5,?6,'active',1,?7)",
+                params![binding_id.to_string(), device_id.to_string(), network_id.to_string(), provider_instance_id.to_string(), evidence.provider_identity.node_id.as_str(), evidence.provider_identity.stable_key_fingerprint, evidence.observed_at.timestamp_millis()],
+            )?;
+            tx.execute(
+                "INSERT INTO n5_n4_provider_binding_provenance (binding_id,provenance_kind,device_id,network_id,identity_origin_kind,identity_origin_id,join_session_id,credential_id,provider_credential_reference,provider_instance_id) VALUES (?1,'n4_join_session',?2,?3,'n4_join_session',?4,?4,?5,?6,?7)",
+                params![binding_id.to_string(), device_id.to_string(), network_id.to_string(), evidence.join_session_id.to_string(), provenance.2, evidence.provider_reference.as_str(), provider_instance_id.to_string()],
             )?;
             tx.execute(
                 "INSERT INTO n5_device_trust_state (device_id,network_id,trust_state,trust_revision,created_at_ms,activated_at_ms,revoked_at_ms,last_decision_id) VALUES (?1,?2,'untrusted',1,?3,NULL,NULL,NULL)",
@@ -1297,9 +1305,12 @@ fn load_n5_identity_by_session(
 ) -> Result<Option<N5DeviceIdentity>, StateError> {
     connection
         .query_row(
-            "SELECT i.device_id,i.network_id,i.confirmed_at_ms,b.binding_id,b.provider_credential_reference,b.provider_instance_id,b.provider_node_id,b.machine_key_fingerprint,b.binding_state,b.binding_revision \
-             FROM n5_device_identities i JOIN n5_provider_bindings b ON b.device_id=i.device_id AND b.join_session_id=i.origin_join_session_id \
-             WHERE i.origin_join_session_id=?1",
+            "SELECT i.device_id,i.network_id,i.confirmed_at_ms,b.binding_id,p.provider_credential_reference,b.provider_instance_id,b.provider_node_id,b.machine_key_fingerprint,b.binding_state,b.binding_revision \
+             FROM n5_device_identities i \
+             JOIN n5_n4_identity_origins o ON o.origin_id=i.n4_origin_id AND o.device_id=i.device_id AND o.network_id=i.network_id \
+             JOIN n5_n4_provider_binding_provenance p ON p.identity_origin_id=o.origin_id AND p.device_id=i.device_id AND p.network_id=i.network_id \
+             JOIN n5_provider_bindings b ON b.binding_id=p.binding_id AND b.device_id=p.device_id AND b.network_id=p.network_id \
+             WHERE o.join_session_id=?1",
             [join_session_id.to_string()],
             |row| {
                 Ok((
@@ -1357,7 +1368,9 @@ fn load_device_trust_view(
     let trust_state = parse_trust_state(&row.1)?;
     let binding_join = connection
         .query_row(
-            "SELECT join_session_id FROM n5_provider_bindings WHERE device_id=?1",
+            "SELECT p.join_session_id FROM n5_provider_bindings b \
+             JOIN n5_n4_provider_binding_provenance p ON p.binding_id=b.n4_provenance_binding_id AND p.device_id=b.device_id AND p.network_id=b.network_id \
+             WHERE b.device_id=?1",
             [device_id.to_string()],
             |row| row.get::<_, String>(0),
         )

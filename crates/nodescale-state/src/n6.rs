@@ -5,7 +5,7 @@ use nodescale_domain::{
     KeryxBindingDecisionId, KeryxBindingId, KeryxBindingState, KeryxPeerId,
     N6AuthenticatedBindRequest, N6BindingChallengeDelivery, N6BindingChallengeRequest,
     N6BindingRevocationIntent, N6BindingRotationIntent, OperationId, OwnerTrustRootToken,
-    TrustAuthorityId, n7::N6ActiveBindingProvenance,
+    ProviderBindingId, TrustAuthorityId, n7::N6ActiveBindingProvenance,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -14,6 +14,7 @@ pub struct N6BindingView {
     pub binding_id: KeryxBindingId,
     pub network_id: NetworkId,
     pub device_id: DeviceId,
+    pub provider_binding_id: ProviderBindingId,
     pub join_session_id: JoinSessionId,
     pub verified_peer_id: Option<KeryxPeerId>,
     pub generation: Generation,
@@ -115,8 +116,17 @@ impl StateStore {
         request: N6AuthenticatedBindRequest,
         now: DateTime<Utc>,
     ) -> Result<N6AuthenticatedBindOutcome, StateError> {
-        let fingerprint = n6_request_fingerprint(&authenticated_peer_id, &request);
         self.transactional(|tx, store| {
+            let historical_join_session_id = JoinSessionId::parse(&tx.query_row(
+                "SELECT p.join_session_id FROM n5_provider_bindings b JOIN n5_n4_provider_binding_provenance p ON p.binding_id=b.n4_provenance_binding_id AND p.device_id=b.device_id AND p.network_id=b.network_id WHERE b.binding_id=?1 AND b.device_id=?2 AND b.network_id=?3",
+                params![request.provider_binding_id().to_string(), request.device_id().to_string(), request.network_id().to_string()],
+                |row| row.get::<_, String>(0),
+            )?).map_err(|error| StateError::Conflict(error.to_string()))?;
+            let fingerprint = n6_request_fingerprint(
+                &authenticated_peer_id,
+                &request,
+                historical_join_session_id,
+            );
             if let Some((stored_fingerprint, binding_id)) = tx
                 .query_row(
                     "SELECT request_fingerprint,binding_id FROM n6_control_operations WHERE authenticated_peer_id=?1 AND operation_id=?2",
@@ -136,9 +146,9 @@ impl StateStore {
             let challenge = tx
                 .query_row(
                     "SELECT challenge_id,binding_id,challenge_verifier,expires_at_ms,agent_version \
-                     FROM n6_binding_challenges WHERE network_id=?1 AND device_id=?2 AND join_session_id=?3 \
-                       AND generation=?4 AND expected_authenticated_peer_id=?5 AND challenge_state='pending'",
-                    params![request.network_id().to_string(), request.device_id().to_string(), request.join_session_id().to_string(), request.generation().get(), authenticated_peer_id.as_str()],
+                     FROM n6_binding_challenges WHERE network_id=?1 AND device_id=?2 \
+                       AND generation=?3 AND expected_authenticated_peer_id=?4 AND challenge_state='pending'",
+                    params![request.network_id().to_string(), request.device_id().to_string(), request.generation().get(), authenticated_peer_id.as_str()],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?)),
                 )
                 .optional()?
@@ -161,7 +171,7 @@ impl StateStore {
             let binding = store.n6_binding_view_tx(tx, binding_id)?;
             if binding.network_id != request.network_id()
                 || binding.device_id != request.device_id()
-                || binding.join_session_id != request.join_session_id()
+                || binding.provider_binding_id != request.provider_binding_id()
                 || binding.generation != request.generation()
                 || binding.state != KeryxBindingState::Pending
             {
@@ -394,8 +404,8 @@ impl StateStore {
                 KeryxBindingAuthorizationCapability::Revoke => "revoke",
             };
             tx.execute(
-                "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,join_session_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,issued_decision_id,issued_audit_event_id,authorization_state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'pending')",
-                params![authorization.authorization_id().to_string(), authority_id.to_string(), binding_id.to_string(), binding.network_id.to_string(), binding.device_id.to_string(), binding.join_session_id.to_string(), binding.generation.get(), binding.revision, action, actor.source, actor.actor_id, now.timestamp_millis(), expires_at.timestamp_millis(), decision.to_string(), audit.to_string()],
+                "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,issued_decision_id,issued_audit_event_id,authorization_state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'pending')",
+                params![authorization.authorization_id().to_string(), authority_id.to_string(), binding_id.to_string(), binding.network_id.to_string(), binding.device_id.to_string(), binding.generation.get(), binding.revision, action, actor.source, actor.actor_id, now.timestamp_millis(), expires_at.timestamp_millis(), decision.to_string(), audit.to_string()],
             )?;
             Ok(authorization)
         })
@@ -492,6 +502,7 @@ impl StateStore {
                 binding_id: successor_id,
                 network_id: predecessor.network_id,
                 device_id: predecessor.device_id,
+                provider_binding_id: predecessor.provider_binding_id,
                 join_session_id: predecessor.join_session_id,
                 verified_peer_id: None,
                 generation: intent.expected_next_generation(),
@@ -505,8 +516,8 @@ impl StateStore {
             };
             store.insert_n6_decision(tx, successor_decision, successor_audit, "binding", "issue", successor_id, None, None, &successor, "", "pending", 0, 1, now, intent.authorization().actor().clone(), "binding_issued", None, None, &agent_version)?;
             tx.execute(
-                "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,NULL,?5,1,'pending',?6,?7,?8,?9,?10,?11)",
-                params![successor_id.to_string(), predecessor.network_id.to_string(), predecessor.device_id.to_string(), predecessor.join_session_id.to_string(), successor.generation.get(), now.timestamp_millis(), predecessor.binding_id.to_string(), intent.authorization().authorization_id().to_string(), agent_version.as_str(), successor_decision.to_string(), successor_audit.to_string()],
+                "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,NULL,?5,1,'pending',?6,?7,?8,?9,?10,?11)",
+                params![successor_id.to_string(), predecessor.network_id.to_string(), predecessor.device_id.to_string(), predecessor.provider_binding_id.to_string(), successor.generation.get(), now.timestamp_millis(), predecessor.binding_id.to_string(), intent.authorization().authorization_id().to_string(), agent_version.as_str(), successor_decision.to_string(), successor_audit.to_string()],
             )?;
 
             let rotation_audit = store.append_n6_audit(tx, predecessor.network_id, predecessor.device_id, intent.authorization().actor().clone(), "keryx_binding_rotated", "success", predecessor.generation, now)?;
@@ -612,8 +623,14 @@ impl StateStore {
         request
             .validate_at(now)
             .map_err(|error| StateError::Conflict(error.to_string()))?;
-        let fingerprint = n6_challenge_fingerprint(request);
         self.transactional(|tx, store| {
+            let historical_join_session_id = JoinSessionId::parse(&tx.query_row(
+                "SELECT p.join_session_id FROM n5_provider_bindings b JOIN n5_n4_provider_binding_provenance p ON p.binding_id=b.n4_provenance_binding_id AND p.device_id=b.device_id AND p.network_id=b.network_id JOIN n5_device_identities i ON i.device_id=b.device_id AND i.network_id=b.network_id WHERE b.binding_id=?1 AND b.device_id=?2 AND b.network_id=?3 AND p.identity_origin_id=i.n4_origin_id",
+                params![request.provider_binding_id().to_string(), request.device_id().to_string(), request.network_id().to_string()],
+                |row| row.get::<_, String>(0),
+            ).optional()?.ok_or_else(|| StateError::Conflict("N6 challenge requires exact confirmed N5 provider-binding provenance".into()))?).map_err(|error| StateError::Conflict(error.to_string()))?;
+            let provider_binding_id = request.provider_binding_id();
+            let fingerprint = n6_challenge_fingerprint(request, historical_join_session_id);
             if let Some((stored_fingerprint, state, reservation_id, binding_id, generation)) = tx
                 .query_row(
                     "SELECT request_fingerprint,reservation_state,reservation_id,binding_id,generation FROM n6_challenge_reservations WHERE expected_authenticated_peer_id=?1 AND operation_id=?2",
@@ -636,33 +653,28 @@ impl StateStore {
                         .map_err(|error| StateError::Conflict(error.to_string()))?,
                 }));
             }
-            let exact_n5: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM n5_device_identities WHERE device_id=?1 AND network_id=?2 AND origin_join_session_id=?3)",
-                params![request.device_id().to_string(), request.network_id().to_string(), request.join_session_id().to_string()], |row| row.get(0),
-            )?;
-            if !exact_n5 { return Err(StateError::Conflict("N6 challenge requires exact confirmed N5 join provenance".into())); }
             let existing = tx.query_row(
-                "SELECT binding_id,binding_state FROM n6_binding_records WHERE network_id=?1 AND device_id=?2 AND generation=?3",
+                "SELECT binding_id,binding_state,n5_provider_binding_id FROM n6_binding_records WHERE network_id=?1 AND device_id=?2 AND generation=?3",
                 params![request.network_id().to_string(), request.device_id().to_string(), request.generation().get()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
             ).optional()?;
             let binding_id = match existing {
-                Some((id, state)) if state == "pending" => KeryxBindingId::parse(&id).map_err(|e| StateError::Conflict(e.to_string()))?,
+                Some((id, state, provenance)) if state == "pending" && provenance == provider_binding_id.to_string() => KeryxBindingId::parse(&id).map_err(|e| StateError::Conflict(e.to_string()))?,
                 Some(_) => return Err(StateError::Conflict("N6 binding generation is no longer challengeable".into())),
                 None => {
                     let binding_id = KeryxBindingId::new();
                     let audit = store.append_n6_audit(tx, request.network_id(), request.device_id(), AuditActor::system(), "keryx_binding_pending", "success", request.generation(), now)?;
                     let decision = KeryxBindingDecisionId::new();
-                    let pending = N6BindingView { binding_id, network_id: request.network_id(), device_id: request.device_id(), join_session_id: request.join_session_id(), verified_peer_id: None, generation: request.generation(), revision: 1, state: KeryxBindingState::Pending, created_at: now, confirmed_at: None, stale_at: None, rotated_at: None, revoked_at: None };
+                    let pending = N6BindingView { binding_id, network_id: request.network_id(), device_id: request.device_id(), provider_binding_id, join_session_id: historical_join_session_id, verified_peer_id: None, generation: request.generation(), revision: 1, state: KeryxBindingState::Pending, created_at: now, confirmed_at: None, stale_at: None, rotated_at: None, revoked_at: None };
                     store.insert_n6_decision(tx, decision, audit, "binding", "issue", binding_id, None, None, &pending, "", "pending", 0, 1, now, AuditActor::system(), "binding_issued", Some(request.expected_authenticated_peer_id()), None, request.agent_version())?;
-                    tx.execute("INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,NULL,?5,1,'pending',?6,?7,?8,?9)", params![binding_id.to_string(), request.network_id().to_string(), request.device_id().to_string(), request.join_session_id().to_string(), request.generation().get(), now.timestamp_millis(), request.agent_version().as_str(), decision.to_string(), audit.to_string()])?;
+                    tx.execute("INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,NULL,?5,1,'pending',?6,?7,?8,?9)", params![binding_id.to_string(), request.network_id().to_string(), request.device_id().to_string(), provider_binding_id.to_string(), request.generation().get(), now.timestamp_millis(), request.agent_version().as_str(), decision.to_string(), audit.to_string()])?;
                     binding_id
                 }
             };
             store.invalidate_n6_pending_challenge(tx, binding_id, now)?;
             tx.execute("UPDATE n6_challenge_reservations SET reservation_state='abandoned',abandoned_at_ms=?2 WHERE binding_id=?1 AND reservation_state='reserved'", params![binding_id.to_string(), now.timestamp_millis()])?;
             let reservation_id = uuid::Uuid::new_v4().to_string();
-            tx.execute("INSERT INTO n6_challenge_reservations (reservation_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,operation_id,request_fingerprint,generation,expires_at_ms,agent_version,reservation_state,reserved_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'reserved',?12)", params![reservation_id, binding_id.to_string(), request.network_id().to_string(), request.device_id().to_string(), request.join_session_id().to_string(), request.expected_authenticated_peer_id().as_str(), operation_id.as_str(), fingerprint, request.generation().get(), request.expires_at().timestamp_millis(), request.agent_version().as_str(), now.timestamp_millis()])?;
+            tx.execute("INSERT INTO n6_challenge_reservations (reservation_id,binding_id,network_id,device_id,expected_authenticated_peer_id,operation_id,request_fingerprint,generation,expires_at_ms,agent_version,reservation_state,reserved_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'reserved',?11)", params![reservation_id, binding_id.to_string(), request.network_id().to_string(), request.device_id().to_string(), request.expected_authenticated_peer_id().as_str(), operation_id.as_str(), fingerprint, request.generation().get(), request.expires_at().timestamp_millis(), request.agent_version().as_str(), now.timestamp_millis()])?;
             Ok(N6ChallengeReservationOutcome::Acquired(N6ChallengeReservation {
                 reservation_id,
                 binding_id,
@@ -702,7 +714,7 @@ impl StateStore {
             let audit = store.append_n6_audit(tx, binding.network_id, binding.device_id, AuditActor::system(), "keryx_binding_nonce_issued", "success", binding.generation, now)?;
             let decision = KeryxBindingDecisionId::new();
             store.insert_n6_decision(tx, decision, audit, "challenge", "issue", reservation.binding_id, Some(challenge_id), None, &binding, "", "pending", 0, 1, now, AuditActor::system(), "challenge_issued", Some(&peer), Some(&operation_id), &agent_version)?;
-            tx.execute("INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'pending',?9,?10,?11,?12,?13)", params![challenge_id.to_string(), reservation.binding_id.to_string(), binding.network_id.to_string(), binding.device_id.to_string(), binding.join_session_id.to_string(), peer.as_str(), binding.generation.get(), verifier.as_str(), now.timestamp_millis(), expires_at.timestamp_millis(), agent_version.as_str(), decision.to_string(), audit.to_string()])?;
+            tx.execute("INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12)", params![challenge_id.to_string(), reservation.binding_id.to_string(), binding.network_id.to_string(), binding.device_id.to_string(), peer.as_str(), binding.generation.get(), verifier.as_str(), now.timestamp_millis(), expires_at.timestamp_millis(), agent_version.as_str(), decision.to_string(), audit.to_string()])?;
             if tx.execute("UPDATE n6_challenge_reservations SET reservation_state='issued',issued_at_ms=?1,challenge_id=?2 WHERE reservation_id=?3 AND reservation_state='reserved'", params![now.timestamp_millis(), challenge_id.to_string(), reservation.reservation_id])? != 1 {
                 return Err(StateError::Conflict("N6 challenge reservation completion lost".into()));
             }
@@ -722,7 +734,7 @@ impl StateStore {
         binding_id: KeryxBindingId,
         now: DateTime<Utc>,
     ) -> Result<(), StateError> {
-        let Some((challenge, network, device, session, generation, agent)) = tx.query_row("SELECT challenge_id,network_id,device_id,join_session_id,generation,agent_version FROM n6_binding_challenges WHERE binding_id=?1 AND challenge_state='pending'", [binding_id.to_string()], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, String>(2)?,r.get::<_, String>(3)?,r.get::<_, u64>(4)?,r.get::<_, String>(5)?))).optional()? else { return Ok(()); };
+        let Some((challenge, network, device, generation, agent)) = tx.query_row("SELECT challenge_id,network_id,device_id,generation,agent_version FROM n6_binding_challenges WHERE binding_id=?1 AND challenge_state='pending'", [binding_id.to_string()], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, String>(2)?,r.get::<_, u64>(3)?,r.get::<_, String>(4)?))).optional()? else { return Ok(()); };
         let view = self.n6_binding_view_tx(tx, binding_id)?;
         let audit = self.append_n6_audit(
             tx,
@@ -761,7 +773,6 @@ impl StateStore {
             None,
             &agent_version,
         )?;
-        let _ = session;
         tx.execute("UPDATE n6_binding_challenges SET challenge_state='invalidated',invalidated_at_ms=?1,last_decision_id=?2,last_audit_event_id=?3 WHERE challenge_id=?4 AND challenge_state='pending'", params![now.timestamp_millis(), decision.to_string(), audit.to_string(), challenge])?;
         Ok(())
     }
@@ -772,16 +783,18 @@ impl StateStore {
         binding_id: KeryxBindingId,
     ) -> Result<N6BindingView, StateError> {
         let row = tx.query_row(
-            "SELECT network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms FROM n6_binding_records WHERE binding_id=?1",
+            "SELECT r.network_id,r.device_id,r.n5_provider_binding_id,p.join_session_id,r.verified_peer_id,r.generation,r.revision,r.binding_state,r.created_at_ms,r.confirmed_at_ms,r.stale_at_ms,r.rotated_at_ms,r.revoked_at_ms \
+             FROM n6_binding_records r JOIN n5_n4_provider_binding_provenance p ON p.binding_id=r.n5_provider_binding_id \
+             WHERE r.binding_id=?1",
             [binding_id.to_string()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, u64>(4)?, row.get::<_, u64>(5)?, row.get::<_, String>(6)?, row.get::<_, i64>(7)?, row.get::<_, Option<i64>>(8)?, row.get::<_, Option<i64>>(9)?, row.get::<_, Option<i64>>(10)?, row.get::<_, Option<i64>>(11)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, u64>(5)?, row.get::<_, u64>(6)?, row.get::<_, String>(7)?, row.get::<_, i64>(8)?, row.get::<_, Option<i64>>(9)?, row.get::<_, Option<i64>>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<i64>>(12)?)),
         ).optional()?.ok_or_else(|| StateError::NotFound(binding_id.to_string()))?;
         let time = |value: i64| {
             DateTime::from_timestamp_millis(value)
                 .ok_or_else(|| StateError::Conflict("invalid N6 timestamp".into()))
         };
         let optional_time = |value: Option<i64>| value.map(time).transpose();
-        let state = match row.6.as_str() {
+        let state = match row.7.as_str() {
             "pending" => KeryxBindingState::Pending,
             "active" => KeryxBindingState::Active,
             "stale" => KeryxBindingState::Stale,
@@ -795,22 +808,24 @@ impl StateStore {
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
             device_id: DeviceId::parse(&row.1)
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
-            join_session_id: JoinSessionId::parse(&row.2)
+            provider_binding_id: ProviderBindingId::parse(&row.2)
+                .map_err(|error| StateError::Conflict(error.to_string()))?,
+            join_session_id: JoinSessionId::parse(&row.3)
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
             verified_peer_id: row
-                .3
+                .4
                 .map(KeryxPeerId::parse)
                 .transpose()
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
-            generation: Generation::new(row.4)
+            generation: Generation::new(row.5)
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
-            revision: row.5,
+            revision: row.6,
             state,
-            created_at: time(row.7)?,
-            confirmed_at: optional_time(row.8)?,
-            stale_at: optional_time(row.9)?,
-            rotated_at: optional_time(row.10)?,
-            revoked_at: optional_time(row.11)?,
+            created_at: time(row.8)?,
+            confirmed_at: optional_time(row.9)?,
+            stale_at: optional_time(row.10)?,
+            rotated_at: optional_time(row.11)?,
+            revoked_at: optional_time(row.12)?,
         })
     }
 
@@ -859,20 +874,23 @@ impl StateStore {
     ) -> Result<(), StateError> {
         let issue = kind == "issue";
         tx.execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
-            params![decision_id.to_string(), audit_id.to_string(), subject, kind, binding_id.to_string(), challenge_id.map(|id| id.to_string()), authorization_id.map(|id| id.to_string()), binding.network_id.to_string(), binding.device_id.to_string(), binding.join_session_id.to_string(), binding.generation.get(), if issue { None } else { Some(prior_state) }, new_state, if issue { None } else { Some(prior_revision) }, new_revision, now.timestamp_millis(), actor.source, actor.actor_id, reason, peer.map(KeryxPeerId::as_str), operation_id.map(OperationId::as_str), agent_version.as_str()],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            params![decision_id.to_string(), audit_id.to_string(), subject, kind, binding_id.to_string(), challenge_id.map(|id| id.to_string()), authorization_id.map(|id| id.to_string()), binding.network_id.to_string(), binding.device_id.to_string(), binding.generation.get(), if issue { None } else { Some(prior_state) }, new_state, if issue { None } else { Some(prior_revision) }, new_revision, now.timestamp_millis(), actor.source, actor.actor_id, reason, peer.map(KeryxPeerId::as_str), operation_id.map(OperationId::as_str), agent_version.as_str()],
         ).map_err(map_constraint)?;
         Ok(())
     }
 }
 
-fn n6_challenge_fingerprint(request: &N6BindingChallengeRequest) -> String {
+fn n6_challenge_fingerprint(
+    request: &N6BindingChallengeRequest,
+    historical_join_session_id: JoinSessionId,
+) -> String {
     let mut hasher = Sha256::new();
     for value in [
         request.expected_authenticated_peer_id().as_str(),
         &request.network_id().to_string(),
         &request.device_id().to_string(),
-        &request.join_session_id().to_string(),
+        &historical_join_session_id.to_string(),
         &request.generation().get().to_string(),
         &request.expires_at().timestamp_millis().to_string(),
         request.agent_version().as_str(),
@@ -883,14 +901,18 @@ fn n6_challenge_fingerprint(request: &N6BindingChallengeRequest) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn n6_request_fingerprint(peer: &KeryxPeerId, request: &N6AuthenticatedBindRequest) -> String {
+fn n6_request_fingerprint(
+    peer: &KeryxPeerId,
+    request: &N6AuthenticatedBindRequest,
+    historical_join_session_id: JoinSessionId,
+) -> String {
     let mut hasher = Sha256::new();
     for value in [
         peer.as_str(),
         request.operation_id().as_str(),
         &request.network_id().to_string(),
         &request.device_id().to_string(),
-        &request.join_session_id().to_string(),
+        &historical_join_session_id.to_string(),
         &request.generation().get().to_string(),
         request.agent_version().as_str(),
     ] {

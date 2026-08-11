@@ -1,10 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use nodescale_domain::{
     AgentVersion, Device, DeviceId, DeviceTrustAuthorityAdminIntent, DeviceTrustCapability,
-    Generation, JoinSessionId, KeryxBindingAuthorizationCapability, KeryxBindingDecisionId,
-    KeryxPeerId, N6AuthenticatedBindRequest, N6BindingChallengeRequest, N6BindingRevocationIntent,
-    N6BindingRotationIntent, NetworkId, OperationId, OwnerTrustRootToken, ReasonCode,
-    TrustAuthorityId, TrustRootId,
+    Generation, KeryxBindingAuthorizationCapability, KeryxBindingDecisionId, KeryxPeerId,
+    N6AuthenticatedBindRequest, N6BindingChallengeRequest, N6BindingRevocationIntent,
+    N6BindingRotationIntent, NetworkId, OperationId, OwnerTrustRootToken, ProviderBindingId,
+    ReasonCode, TrustAuthorityId, TrustRootId,
 };
 use nodescale_state::{
     N5TrustAuthorityConfiguration, N6AuthenticatedBindOutcome, N6BindingView,
@@ -17,7 +17,6 @@ use tempfile::{TempDir, tempdir};
 
 const NETWORK: &str = "10bdbae2-73be-46f2-8f0a-5b761fdeaf4d";
 const DEVICE: &str = "f9b36c3a-e777-4e92-a4ea-14d22a234ecc";
-const SESSION: &str = "cafa4427-4c17-408e-bfed-c93f34bd3756";
 
 fn now() -> DateTime<Utc> {
     "2026-08-08T00:00:00Z".parse().unwrap()
@@ -38,7 +37,9 @@ fn seed_confirmed_n5_provenance(path: &std::path::Path) {
         .unwrap();
     connection
         .execute_batch(
-            "INSERT INTO networks (network_id,name,state,provider_kind,provider_instance_id,membership_generation,policy_generation,record_json,created_at,updated_at)
+            "BEGIN;
+             PRAGMA defer_foreign_keys=ON;
+             INSERT INTO networks (network_id,name,state,provider_kind,provider_instance_id,membership_generation,policy_generation,record_json,created_at,updated_at)
              VALUES ('10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n6 authority guards','active','headscale','provider-n6',1,1,'{}','2026-08-08T00:00:00Z','2026-08-08T00:00:00Z');
              INSERT INTO devices (device_id,network_id,display_name,membership_state,provider_instance_id,provider_node_id,provider_key_fingerprint,credential_generation,keryx_binding_generation,fleet_projection_generation,fleet_projection_status,record_json,created_at,updated_at,revoked_at)
              VALUES ('f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n6 device','pending',NULL,NULL,NULL,1,1,1,'none','{}','2026-08-08T00:00:00Z','2026-08-08T00:00:00Z',NULL);
@@ -58,8 +59,17 @@ fn seed_confirmed_n5_provenance(path: &std::path::Path) {
              VALUES ('610c7a7c-ee1b-4579-a7c1-2e5fbba13765','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6','[]','{}','nodescale',NULL,1,'{}');
              INSERT INTO n4_join_session_dispatches (join_session_id,invitation_id,network_id,provider_instance_id,provider_principal_id,create_request_id,dispatch_state,authorization_generation,configuration_generation,configuration_fingerprint,dispatched_at_ms,resolved_at_ms,credential_id)
              VALUES ('cafa4427-4c17-408e-bfed-c93f34bd3756','610c7a7c-ee1b-4579-a7c1-2e5fbba13765','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6','00000000-0000-0000-0000-000000000006','confirmed',1,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1000,1001,'1647eae9-8b5a-43e8-95b0-9a2470dc440a');
-             INSERT INTO n5_device_identities (device_id,network_id,origin_join_session_id,confirmed_at_ms,identity_revision,safe_correlation_digest)
-             VALUES ('f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','cafa4427-4c17-408e-bfed-c93f34bd3756',1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');",
+             INSERT INTO n4_provider_credential_metadata (credential_id,join_session_id,network_id,provider_instance_id,provider_principal_id,single_use,reusable,ephemeral,approved_tags_json,expires_at_ms,confirmed_at_ms,invalidation_state,invalidated_at_ms,safe_correlation_json)
+             VALUES ('1647eae9-8b5a-43e8-95b0-9a2470dc440a','cafa4427-4c17-408e-bfed-c93f34bd3756','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6',1,0,1,'[]',999999999999,1001,'active',NULL,'{}');
+             INSERT INTO n5_device_identities (device_id,network_id,identity_origin_kind,identity_origin_id,n4_origin_id,adoption_origin_id,confirmed_at_ms,identity_revision,safe_correlation_digest)
+             VALUES ('f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n4_join_session','cafa4427-4c17-408e-bfed-c93f34bd3756','cafa4427-4c17-408e-bfed-c93f34bd3756',NULL,1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+             INSERT INTO n5_n4_identity_origins (origin_id,origin_kind,device_id,network_id,join_session_id)
+             VALUES ('cafa4427-4c17-408e-bfed-c93f34bd3756','n4_join_session','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','cafa4427-4c17-408e-bfed-c93f34bd3756');
+             INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,provenance_kind,n4_provenance_binding_id,adoption_provenance_binding_id,provider_instance_id,provider_node_id,machine_key_fingerprint,binding_state,binding_revision,observed_at_ms)
+             VALUES ('11111111-1111-4111-8111-111111111111','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n4_join_session','11111111-1111-4111-8111-111111111111',NULL,'provider-n6','provider-node-n6','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','active',1,1001);
+             INSERT INTO n5_n4_provider_binding_provenance (binding_id,provenance_kind,device_id,network_id,identity_origin_kind,identity_origin_id,join_session_id,credential_id,provider_credential_reference,provider_instance_id)
+             VALUES ('11111111-1111-4111-8111-111111111111','n4_join_session','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n4_join_session','cafa4427-4c17-408e-bfed-c93f34bd3756','cafa4427-4c17-408e-bfed-c93f34bd3756','1647eae9-8b5a-43e8-95b0-9a2470dc440a','provider-ref-n6','provider-n6');
+             COMMIT;",
         )
         .unwrap();
     let device = Device::new(
@@ -96,7 +106,7 @@ fn fixture() -> Fixture {
             N6BindingChallengeRequest::new(
                 network_id(),
                 DeviceId::parse(DEVICE).unwrap(),
-                JoinSessionId::parse(SESSION).unwrap(),
+                ProviderBindingId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
                 peer.clone(),
                 Generation::initial(),
                 now() + Duration::minutes(5),
@@ -115,7 +125,7 @@ fn fixture() -> Fixture {
                 OperationId::parse("authority-guard-bind").unwrap(),
                 network_id(),
                 DeviceId::parse(DEVICE).unwrap(),
-                JoinSessionId::parse(SESSION).unwrap(),
+                ProviderBindingId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
                 nonce.parse().unwrap(),
                 Generation::initial(),
                 version(),

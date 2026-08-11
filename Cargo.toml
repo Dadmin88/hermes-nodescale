@@ -32,8 +32,8 @@ axum = { version = "0.8.7", features = ["json"] }
 axum-server = { version = "0.7.3", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
-keryx-proto = { git = "https://github.com/Dadmin88/hermes-keryx", rev = "8fe1769612d701e7509644ac7c9ebb3b8c24fcb1" }
-keryx-relay = { git = "https://github.com/Dadmin88/hermes-keryx", rev = "8fe1769612d701e7509644ac7c9ebb3b8c24fcb1" }
+keryx-proto = { git = "https://github.com/Dadmin88/hermes-keryx", rev = "54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee" }
+keryx-relay = { git = "https://github.com/Dadmin88/hermes-keryx", rev = "54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rcgen = "0.13"

@@ -17,7 +17,7 @@ use nodescale_domain::n7::{FleetGeneratedGrants, N7FleetDesiredProjection};
 use nodescale_domain::{
     AgentVersion, Device, DeviceId, Generation, JoinSessionId, KeryxPeerId, MembershipState,
     N6AuthenticatedBindRequest, N6BindingChallengeRequest, Network, NetworkId, Operation,
-    OperationId, ProviderInstanceId, ProviderKind, Role, Roles,
+    OperationId, ProviderBindingId, ProviderInstanceId, ProviderKind, Role, Roles,
 };
 use nodescale_fleet_client::{
     ApplyError, ApplyOperation, ApplyOutcome, ApplyResult, Capabilities, FleetClientError,
@@ -62,13 +62,13 @@ fn fixture(path: &Path) -> (StateStore, N7FleetDesiredProjection) {
         )
         .expect("persist device");
 
-    let session_id = seed_confirmed_n5_provenance(path, network_id, device_id);
+    let provider_binding_id = seed_confirmed_n5_provenance(path, network_id, device_id);
     let peer = KeryxPeerId::parse("n7-production-peer").expect("peer");
     let version = AgentVersion::parse("nodescale-agent:7.0.0").expect("agent version");
     let challenge = N6BindingChallengeRequest::new(
         network_id,
         device_id,
-        session_id,
+        provider_binding_id,
         peer.clone(),
         Generation::initial(),
         now() + Duration::minutes(5),
@@ -87,7 +87,7 @@ fn fixture(path: &Path) -> (StateStore, N7FleetDesiredProjection) {
                 operation("n7-binding-confirm"),
                 network_id,
                 device_id,
-                session_id,
+                provider_binding_id,
                 nonce.parse().expect("reparse issued nonce"),
                 Generation::initial(),
                 version,
@@ -132,7 +132,7 @@ fn seed_confirmed_n5_provenance(
     path: &Path,
     network_id: NetworkId,
     device_id: DeviceId,
-) -> JoinSessionId {
+) -> ProviderBindingId {
     let invitation_id = "60000000-0000-0000-0000-000000000001";
     let session_id =
         JoinSessionId::parse("70000000-0000-0000-0000-000000000001").expect("fixture session ID");
@@ -142,17 +142,18 @@ fn seed_confirmed_n5_provenance(
     let connection = Connection::open(path).expect("open fixture state");
     connection
         .execute_batch(&format!(
-            "INSERT INTO invitations (invitation_id,network_id,state,secret_verifier,provider_credential_reference,max_uses,used_count,record_json,created_at,expires_at) VALUES ('{invitation_id}','{network}','issued','$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$MDEyMzQ1Njc4OWFiY2RlZg',NULL,1,0,'{{}}','2026-08-08T00:00:00Z','2026-08-09T00:00:00Z');
+            "BEGIN; PRAGMA defer_foreign_keys=ON;\n             INSERT INTO invitations (invitation_id,network_id,state,secret_verifier,provider_credential_reference,max_uses,used_count,record_json,created_at,expires_at) VALUES ('{invitation_id}','{network}','issued','$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$MDEyMzQ1Njc4OWFiY2RlZg',NULL,1,0,'{{}}','2026-08-08T00:00:00Z','2026-08-09T00:00:00Z');
              INSERT INTO join_sessions (join_session_id,invitation_id,network_id,device_id,state,record_json,created_at,expires_at,updated_at) VALUES ('{session_id}','{invitation_id}','{network}','{device}','credential_issued','{{}}','2026-08-08T00:00:00Z','2026-08-09T00:00:00Z','2026-08-08T00:00:00Z');
              INSERT INTO provider_imports (network_id,provider_instance_id,server_url,opaque_secret_reference,compatibility_pin,tls_verification,read_only,mutation_allowed,compatibility,provider_version,last_success_at,last_attempt_at,last_failure_kind,last_failure_detail,custom_root_ca_sha256) VALUES ('{network}','provider-n7','https://provider.example.test','secret://vault/n7','v0.29.3','verify',1,0,'compatible','v0.29.3',NULL,NULL,NULL,NULL,NULL);
              INSERT INTO provider_mutation_configurations (network_id,provider_instance_id,authorization_generation,configuration_generation,configuration_fingerprint,adapter,expected_version,enabled,revoked,not_before_ms,expires_at_ms,policy_mode) VALUES ('{network}','provider-n7',1,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','headscale','v0.29.3',1,0,0,999999999999,'database');
              INSERT INTO confirmed_provider_credential_references (credential_id,network_id,provider_instance_id,provider_reference,authorization_generation,configuration_generation,configuration_fingerprint,confirmed_at_ms,expires_at_ms,max_uses) VALUES ('{credential_id}','{network}','provider-n7','provider-ref-n7',1,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1000,999999999999,1);
              INSERT INTO n4_invitation_details (invitation_id,network_id,provider_instance_id,provider_principal_id,roles_json,constraints_json,created_by_source,created_by_id,revision,last_redemption_metadata_json) VALUES ('{invitation_id}','{network}','provider-n7','principal-n7','[]','{{}}','nodescale',NULL,1,'{{}}');
              INSERT INTO n4_join_session_dispatches (join_session_id,invitation_id,network_id,provider_instance_id,provider_principal_id,create_request_id,dispatch_state,authorization_generation,configuration_generation,configuration_fingerprint,dispatched_at_ms,resolved_at_ms,credential_id) VALUES ('{session_id}','{invitation_id}','{network}','provider-n7','principal-n7','90000000-0000-0000-0000-000000000001','confirmed',1,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1000,1001,'{credential_id}');
-             INSERT INTO n5_device_identities (device_id,network_id,origin_join_session_id,confirmed_at_ms,identity_revision,safe_correlation_digest) VALUES ('{device}','{network}','{session_id}',1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');"
+             INSERT INTO n4_provider_credential_metadata (credential_id,join_session_id,network_id,provider_instance_id,provider_principal_id,single_use,reusable,ephemeral,approved_tags_json,expires_at_ms,confirmed_at_ms,invalidation_state,safe_correlation_json) VALUES ('{credential_id}','{session_id}','{network}','provider-n7','principal-n7',1,0,1,'[]',999999999999,1001,'active','{{}}');\n             INSERT INTO n5_device_identities (device_id,network_id,identity_origin_kind,identity_origin_id,n4_origin_id,adoption_origin_id,confirmed_at_ms,identity_revision,safe_correlation_digest) VALUES ('{device}','{network}','n4_join_session','{session_id}','{session_id}',NULL,1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');\n             INSERT INTO n5_n4_identity_origins (origin_id,origin_kind,device_id,network_id,join_session_id) VALUES ('{session_id}','n4_join_session','{device}','{network}','{session_id}');\n             INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,provenance_kind,n4_provenance_binding_id,adoption_provenance_binding_id,provider_instance_id,provider_node_id,machine_key_fingerprint,binding_state,binding_revision,observed_at_ms) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','{device}','{network}','n4_join_session','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',NULL,'provider-n7','provider-node-n7','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','active',1,1001);\n             INSERT INTO n5_n4_provider_binding_provenance (binding_id,provenance_kind,device_id,network_id,identity_origin_kind,identity_origin_id,join_session_id,credential_id,provider_credential_reference,provider_instance_id) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','n4_join_session','{device}','{network}','n4_join_session','{session_id}','{session_id}','{credential_id}','provider-ref-n7','provider-n7'); COMMIT;"
         ))
         .expect("seed confirmed N5 provenance");
-    session_id
+    ProviderBindingId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .expect("fixture provider binding")
 }
 
 fn start_service(

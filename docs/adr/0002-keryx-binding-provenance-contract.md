@@ -22,7 +22,7 @@ The operation:
 - permits safe identical replay and rejects conflicting replay;
 - records a binding generation and supports explicit rotation.
 
-Conceptual request fields are `network_id`, `device_id`, `join_session_id`, `nonce`, and `agent_version`. Conceptual handler context includes authenticated sender, destination, operation, and session provenance.
+Conceptual V2 request fields are `network_id`, `device_id`, `provider_binding_id`, `nonce`, and `agent_version`. Conceptual handler context includes authenticated sender, destination, operation, and relay-frame provenance. Legacy V1 messages still carry `join_session_id` but are rejected with `protocol_version_incompatible`; the field is never reinterpreted as a provider binding.
 
 ## Consequences
 

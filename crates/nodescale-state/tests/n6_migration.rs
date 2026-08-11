@@ -12,7 +12,8 @@ const MIGRATIONS: [&str; 6] = [
     include_str!("../migrations/0005_device_trust.sql"),
     include_str!("../migrations/0006_keryx_identity_binding.sql"),
 ];
-
+const MIGRATION_7: &str = include_str!("../migrations/0007_fleet_projection.sql");
+const MIGRATION_8: &str = include_str!("../migrations/0008_existing_device_adoption_state.sql");
 const NETWORK: &str = "10bdbae2-73be-46f2-8f0a-5b761fdeaf4d";
 const DEVICE: &str = "f9b36c3a-e777-4e92-a4ea-14d22a234ecc";
 const SESSION: &str = "cafa4427-4c17-408e-bfed-c93f34bd3756";
@@ -40,6 +41,30 @@ fn table_exists(connection: &Connection, name: &str) -> bool {
             |row| row.get(0),
         )
         .unwrap()
+}
+
+fn n7_table_counts(connection: &Connection) -> Vec<(String, i64)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'n7_%' ORDER BY name",
+        )
+        .unwrap();
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    tables
+        .into_iter()
+        .map(|table| {
+            let count = connection
+                .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            (table, count)
+        })
+        .collect()
 }
 
 fn schema_object_exists(connection: &Connection, kind: &str, name: &str) -> bool {
@@ -76,8 +101,8 @@ fn seed_n5_confirmed_provenance(connection: &Connection) {
              VALUES ('610c7a7c-ee1b-4579-a7c1-2e5fbba13765','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6','[]','{}','nodescale',NULL,1,NULL,NULL,NULL,NULL,'{}');
              INSERT INTO n4_join_session_dispatches (join_session_id,invitation_id,network_id,provider_instance_id,provider_principal_id,create_request_id,dispatch_state,authorization_generation,configuration_generation,configuration_fingerprint,dispatched_at_ms,resolved_at_ms,credential_id)
              VALUES ('cafa4427-4c17-408e-bfed-c93f34bd3756','610c7a7c-ee1b-4579-a7c1-2e5fbba13765','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6','00000000-0000-0000-0000-000000000006','confirmed',1,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1000,1001,'1647eae9-8b5a-43e8-95b0-9a2470dc440a');
-             INSERT INTO n5_device_identities (device_id,network_id,origin_join_session_id,confirmed_at_ms,identity_revision,safe_correlation_digest)
-             VALUES ('f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','cafa4427-4c17-408e-bfed-c93f34bd3756',1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+             INSERT INTO n4_provider_credential_metadata (credential_id,join_session_id,network_id,provider_instance_id,provider_principal_id,single_use,reusable,ephemeral,approved_tags_json,expires_at_ms,confirmed_at_ms,invalidation_state,invalidated_at_ms,safe_correlation_json)
+             VALUES ('1647eae9-8b5a-43e8-95b0-9a2470dc440a','cafa4427-4c17-408e-bfed-c93f34bd3756','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','provider-n6','principal-n6',1,0,1,'[]',999999999999,1001,'active',NULL,'{}');
              INSERT INTO n5_owner_trust_roots (trust_root_id,network_id,principal_source,principal_id,secret_verifier,enabled,revoked_at_ms,created_at_ms)
              VALUES ('55f08bb1-3cc7-42b4-ab1d-1e83d3d155df','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','operator','operator-n6','$argon2id$v=19$m=19456,t=2,p=1$c2FsdC1uNi1maXhlZC0xNg$MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXY',1,NULL,1000);
              INSERT INTO n5_trust_authorities (authority_id,trust_root_id,network_id,principal_source,principal_id,authority_generation,not_before_ms,expires_at_ms,sealed,enabled,revoked_at_ms,created_at_ms)
@@ -87,6 +112,26 @@ fn seed_n5_confirmed_provenance(connection: &Connection) {
              UPDATE n5_trust_authorities SET sealed=1,enabled=1 WHERE authority_id='6033e8e2-c7ba-4100-a75c-dda7de7db8a7';",
         )
         .unwrap();
+    if table_exists(connection, "n5_n4_identity_origins") {
+        connection.execute_batch(
+            "BEGIN;
+             PRAGMA defer_foreign_keys=ON;
+             INSERT INTO n5_device_identities (device_id,network_id,identity_origin_kind,identity_origin_id,n4_origin_id,adoption_origin_id,confirmed_at_ms,identity_revision,safe_correlation_digest)
+             VALUES ('f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n4_join_session','cafa4427-4c17-408e-bfed-c93f34bd3756','cafa4427-4c17-408e-bfed-c93f34bd3756',NULL,1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+             INSERT INTO n5_n4_identity_origins (origin_id,origin_kind,device_id,network_id,join_session_id)
+             VALUES ('cafa4427-4c17-408e-bfed-c93f34bd3756','n4_join_session','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','cafa4427-4c17-408e-bfed-c93f34bd3756');
+             INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,provenance_kind,n4_provenance_binding_id,adoption_provenance_binding_id,provider_instance_id,provider_node_id,machine_key_fingerprint,binding_state,binding_revision,observed_at_ms)
+             VALUES ('11111111-1111-4111-8111-111111111111','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n4_join_session','11111111-1111-4111-8111-111111111111',NULL,'provider-n6','provider-node-n6','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','active',1,1001);
+             INSERT INTO n5_n4_provider_binding_provenance (binding_id,provenance_kind,device_id,network_id,identity_origin_kind,identity_origin_id,join_session_id,credential_id,provider_credential_reference,provider_instance_id)
+             VALUES ('11111111-1111-4111-8111-111111111111','n4_join_session','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','n4_join_session','cafa4427-4c17-408e-bfed-c93f34bd3756','cafa4427-4c17-408e-bfed-c93f34bd3756','1647eae9-8b5a-43e8-95b0-9a2470dc440a','provider-ref-n6','provider-n6');
+             COMMIT;",
+        ).unwrap();
+    } else {
+        connection.execute(
+            "INSERT INTO n5_device_identities (device_id,network_id,origin_join_session_id,confirmed_at_ms,identity_revision,safe_correlation_digest) VALUES (?1,?2,?3,1001,1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+            params![DEVICE, NETWORK, SESSION],
+        ).unwrap();
+    }
     if table_exists(connection, "n6_binding_authority_capabilities") {
         connection.execute_batch(
             "INSERT INTO audit_events (event_id,timestamp,network_id,device_id,actor_source,actor_id,event_kind,outcome,generation,metadata_json)
@@ -184,25 +229,25 @@ fn insert_binding_decision(
         insert_audit(connection, &issue_audit_id, "challenge", "issue");
         connection
             .execute(
-                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-                 VALUES (?1,?2,'challenge','issue',?3,?4,NULL,?5,?6,?7,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'challenge_issued',?8,NULL,'n6-test-agent')",
-                params![issue_decision_id, issue_audit_id, BINDING, challenge_id, NETWORK, DEVICE, SESSION, PEER],
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+                 VALUES (?1,?2,'challenge','issue',?3,?4,NULL,?5,?6,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'challenge_issued',?7,NULL,'n6-test-agent')",
+                params![issue_decision_id, issue_audit_id, BINDING, challenge_id, NETWORK, DEVICE, PEER],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,1,?7,'pending',2000,3000,'n6-test-agent',?8,?9)",
-                params![challenge_id, BINDING, NETWORK, DEVICE, SESSION, PEER, VERIFIER, issue_decision_id, issue_audit_id],
+                "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id)
+                 VALUES (?1,?2,?3,?4,?5,1,?6,'pending',2000,3000,'n6-test-agent',?7,?8)",
+                params![challenge_id, BINDING, NETWORK, DEVICE, PEER, VERIFIER, issue_decision_id, issue_audit_id],
             )
             .unwrap();
         connection.execute_batch("COMMIT;").unwrap();
         insert_audit(connection, &consume_audit_id, "challenge", "confirm");
         connection
             .execute(
-                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-                 VALUES (?1,?2,'challenge','confirm',?3,?4,NULL,?5,?6,?7,1,'pending','consumed',1,2,2000,'nodescale',NULL,'challenge_confirmed',?8,'operation-n6','n6-test-agent')",
-                params![consume_decision_id, consume_audit_id, BINDING, challenge_id, NETWORK, DEVICE, SESSION, PEER],
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+                 VALUES (?1,?2,'challenge','confirm',?3,?4,NULL,?5,?6,1,'pending','consumed',1,2,2000,'nodescale',NULL,'challenge_confirmed',?7,'operation-n6','n6-test-agent')",
+                params![consume_decision_id, consume_audit_id, BINDING, challenge_id, NETWORK, DEVICE, PEER],
             )
             .unwrap();
         connection
@@ -217,9 +262,9 @@ fn insert_binding_decision(
     };
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES (?1,?2,'binding',?3,?4,?5,NULL,?6,?7,?8,1,?9,?10,?11,?12,?13,'nodescale',NULL,'operator_request',?14,?15,'n6-test-agent')",
-            params![decision_id, audit_id, kind, BINDING, challenge_id, NETWORK, DEVICE, SESSION, prior_state, new_state, prior_revision, new_revision, 2000, PEER, operation_id],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES (?1,?2,'binding',?3,?4,?5,NULL,?6,?7,1,?8,?9,?10,?11,?12,'nodescale',NULL,'operator_request',?13,?14,'n6-test-agent')",
+            params![decision_id, audit_id, kind, BINDING, challenge_id, NETWORK, DEVICE, prior_state, new_state, prior_revision, new_revision, 2000, PEER, operation_id],
         )
         .unwrap();
 }
@@ -244,9 +289,9 @@ fn insert_pending_binding(connection: &Connection) {
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES (?1,?2,?3,?4,NULL,1,1,'pending',2000,NULL,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','d0b74ce6-d0c4-4f9d-89d7-72f0136e7a65','55877447-b50c-43e8-a852-ecca2d71b955')",
-            params![BINDING, NETWORK, DEVICE, SESSION],
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES (?1,?2,?3,'11111111-1111-4111-8111-111111111111',NULL,1,1,'pending',2000,NULL,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','d0b74ce6-d0c4-4f9d-89d7-72f0136e7a65','55877447-b50c-43e8-a852-ecca2d71b955')",
+            params![BINDING, NETWORK, DEVICE],
         )
         .unwrap();
     connection.execute_batch("COMMIT;").unwrap();
@@ -314,16 +359,16 @@ fn insert_pending_authorization_with_window(
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES (?1,?2,'authorization','issue',?3,NULL,?4,?5,?6,?7,?8,NULL,'pending',NULL,1,?9,'operator','operator-n6','authorization_issued',NULL,NULL,'n6-test-agent')",
-            params![decision_id, audit_id, BINDING, authorization_id, NETWORK, DEVICE, SESSION, generation, issued_at_ms],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES (?1,?2,'authorization','issue',?3,NULL,?4,?5,?6,?7,NULL,'pending',NULL,1,?8,'operator','operator-n6','authorization_issued',NULL,NULL,'n6-test-agent')",
+            params![decision_id, audit_id, BINDING, authorization_id, NETWORK, DEVICE, generation, issued_at_ms],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,join_session_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,issued_decision_id,issued_audit_event_id,authorization_state)
-             VALUES (?1,'6033e8e2-c7ba-4100-a75c-dda7de7db8a7',?2,?3,?4,?5,?6,?7,?8,'operator','operator-n6',?9,?10,?11,?12,'pending')",
-            params![authorization_id, BINDING, NETWORK, DEVICE, SESSION, generation, expected_revision, action_kind, issued_at_ms, expires_at_ms, decision_id, audit_id],
+            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,issued_decision_id,issued_audit_event_id,authorization_state)
+             VALUES (?1,'6033e8e2-c7ba-4100-a75c-dda7de7db8a7',?2,?3,?4,?5,?6,?7,'operator','operator-n6',?8,?9,?10,?11,'pending')",
+            params![authorization_id, BINDING, NETWORK, DEVICE, generation, expected_revision, action_kind, issued_at_ms, expires_at_ms, decision_id, audit_id],
         )
         .unwrap();
     connection.execute_batch("COMMIT;").unwrap();
@@ -338,14 +383,14 @@ fn insert_pending_challenge(
     connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
     insert_audit(connection, audit_id, "challenge", "issue");
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES (?1,?2,'challenge','issue',?3,?4,NULL,?5,?6,?7,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'challenge_issued',?8,NULL,'n6-test-agent')",
-        params![decision_id, audit_id, BINDING, challenge_id, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES (?1,?2,'challenge','issue',?3,?4,NULL,?5,?6,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'challenge_issued',?7,NULL,'n6-test-agent')",
+        params![decision_id, audit_id, BINDING, challenge_id, NETWORK, DEVICE, PEER],
     ).unwrap();
     connection.execute(
-        "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id)
-         VALUES (?1,?2,?3,?4,?5,?6,1,?7,'pending',2000,3000,'n6-test-agent',?8,?9)",
-        params![challenge_id, BINDING, NETWORK, DEVICE, SESSION, PEER, VERIFIER, decision_id, audit_id],
+        "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id)
+         VALUES (?1,?2,?3,?4,?5,1,?6,'pending',2000,3000,'n6-test-agent',?7,?8)",
+        params![challenge_id, BINDING, NETWORK, DEVICE, PEER, VERIFIER, decision_id, audit_id],
     ).unwrap();
     connection.execute_batch("COMMIT;").unwrap();
 }
@@ -418,7 +463,7 @@ fn fresh_schema_retains_authoritative_n6_tables() {
 }
 
 #[test]
-fn every_supported_predecessor_upgrades_to_v7_without_losing_n5_or_n6_state() {
+fn every_supported_predecessor_upgrades_to_v9_without_losing_n5_or_n6_state() {
     for predecessor in 1_u32..=6 {
         let directory = tempdir().unwrap();
         let path = directory.path().join(format!("v{predecessor}.db"));
@@ -484,6 +529,102 @@ fn every_supported_predecessor_upgrades_to_v7_without_losing_n5_or_n6_state() {
 }
 
 #[test]
+fn populated_v8_upgrades_to_v9_with_exact_typed_backfill_and_n7_schema_identity() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("populated-v8.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    for migration in MIGRATIONS {
+        connection.execute_batch(migration).unwrap();
+    }
+    seed_n5_confirmed_provenance(&connection);
+    connection.execute("INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,join_session_id,credential_id,provider_instance_id,provider_node_id,machine_key_fingerprint,provider_credential_reference,binding_state,binding_revision,observed_at_ms) VALUES ('11111111-1111-4111-8111-111111111111',?1,?2,?3,'1647eae9-8b5a-43e8-95b0-9a2470dc440a','provider-n6','provider-node-n6','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','provider-ref-n6','active',1,1001)", params![DEVICE,NETWORK,SESSION]).unwrap();
+    let audit = "d0d53f0b-ae6f-48de-a411-9064814350a1";
+    let decision = "ffb2b178-1bf7-44f0-93e2-6137bcfffe3b";
+    let reservation = "2f3ec894-cc0c-4dc8-84ee-b8eea72ab661";
+    let operation = "6c4b6c3d-3251-46fd-87b7-b2b074736106";
+    insert_audit(&connection, audit, "binding", "issue");
+    connection
+        .execute_batch("BEGIN; PRAGMA defer_foreign_keys=ON;")
+        .unwrap();
+    connection.execute("INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,'binding','issue',?3,NULL,NULL,?4,?5,?6,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'challenge_issued',?7,NULL,'n6-test-agent')",params![decision,audit,BINDING,NETWORK,DEVICE,SESSION,PEER]).unwrap();
+    connection.execute("INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,NULL,1,1,'pending',2000,'n6-test-agent',?5,?6)",params![BINDING,NETWORK,DEVICE,SESSION,decision,audit]).unwrap();
+    connection.execute("INSERT INTO n6_challenge_reservations (reservation_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,operation_id,request_fingerprint,generation,expires_at_ms,agent_version,reservation_state,reserved_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',1,5000,'n6-test-agent','reserved',2100)",params![reservation,BINDING,NETWORK,DEVICE,SESSION,PEER,operation]).unwrap();
+    connection.execute_batch("COMMIT;").unwrap();
+    connection.execute_batch(MIGRATION_7).unwrap();
+    connection.execute_batch(MIGRATION_8).unwrap();
+    connection.pragma_update(None, "user_version", 8).unwrap();
+    let n7_before: Vec<(String,String,String)>=connection.prepare("SELECT type,name,sql FROM sqlite_schema WHERE (name LIKE 'n7_%' OR tbl_name LIKE 'n7_%') AND sql IS NOT NULL ORDER BY type,name").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    let n7_counts_before = n7_table_counts(&connection);
+    drop(connection);
+    drop(StateStore::open(&path).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+            .unwrap(),
+        9
+    );
+    let typed:(String,String,String,String,String,i64,String,String)=connection.query_row("SELECT i.identity_origin_kind,io.join_session_id,b.provenance_kind,bp.join_session_id,r.n5_provider_binding_id,r.generation,r.binding_state,z.operation_id FROM n5_device_identities i JOIN n5_n4_identity_origins io ON io.origin_id=i.n4_origin_id AND io.device_id=i.device_id AND io.network_id=i.network_id JOIN n5_provider_bindings b ON b.device_id=i.device_id AND b.network_id=i.network_id JOIN n5_n4_provider_binding_provenance bp ON bp.binding_id=b.n4_provenance_binding_id AND bp.device_id=b.device_id AND bp.network_id=b.network_id JOIN n6_binding_records r ON r.n5_provider_binding_id=b.binding_id AND r.device_id=b.device_id AND r.network_id=b.network_id JOIN n6_challenge_reservations z ON z.binding_id=r.binding_id AND z.device_id=r.device_id AND z.network_id=r.network_id AND z.generation=r.generation WHERE r.binding_id=?1",[BINDING],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).unwrap();
+    assert_eq!(
+        typed,
+        (
+            "n4_join_session".into(),
+            SESSION.into(),
+            "n4_join_session".into(),
+            SESSION.into(),
+            "11111111-1111-4111-8111-111111111111".into(),
+            1,
+            "pending".into(),
+            operation.into()
+        )
+    );
+    let preserved:(String,String,String,String)=connection.query_row("SELECT d.decision_id,d.audit_event_id,z.reservation_id,z.request_fingerprint FROM n6_binding_decisions d JOIN n6_challenge_reservations z ON z.binding_id=d.binding_id AND z.network_id=d.network_id AND z.device_id=d.device_id AND z.generation=d.generation WHERE d.decision_id=?1",[decision],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(
+        preserved,
+        (
+            decision.into(),
+            audit.into(),
+            reservation.into(),
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into()
+        )
+    );
+    let n7_after:Vec<(String,String,String)>=connection.prepare("SELECT type,name,sql FROM sqlite_schema WHERE (name LIKE 'n7_%' OR tbl_name LIKE 'n7_%') AND sql IS NOT NULL ORDER BY type,name").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    assert_eq!(n7_after, n7_before);
+    assert_eq!(n7_table_counts(&connection), n7_counts_before);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name LIKE 'stage_%'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn direct_sql_requires_exact_provenance_decisions_and_immutable_lifecycle() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("n6-guards.db");
@@ -493,16 +634,16 @@ fn direct_sql_requires_exact_provenance_decisions_and_immutable_lifecycle() {
 
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('33fd5328-3139-43a6-96b2-77fba9df4c4c','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756','keryx-peer-n6',1,1,'active',2000,'n6-test-agent','missing','missing')",
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('33fd5328-3139-43a6-96b2-77fba9df4c4c','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','11111111-1111-4111-8111-111111111111','keryx-peer-n6',1,1,'active',2000,'n6-test-agent','missing','missing')",
             [],
         ),
         "direct active binding insert",
     );
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('36dc3932-a6fe-4283-b181-37ad190d015e','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','wrong-session',NULL,1,1,'pending',2000,'n6-test-agent','missing','missing')",
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('36dc3932-a6fe-4283-b181-37ad190d015e','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','11111111-1111-4111-8111-111111111111',NULL,1,1,'pending',2000,'n6-test-agent','missing','missing')",
             [],
         ),
         "binding without exact N5/N4 provenance",
@@ -584,15 +725,15 @@ fn direct_sql_requires_exact_provenance_decisions_and_immutable_lifecycle() {
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('82ebd534-9d72-421e-a732-605a30fabf9a','8e041ede-2f48-4348-81d5-03b22ab9243f','binding','issue','a4b5bf76-1eb1-4ecb-bef7-a6292fc7692d',NULL,NULL,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756',3,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request','keryx-peer-n6',NULL,'n6-test-agent')",
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('82ebd534-9d72-421e-a732-605a30fabf9a','8e041ede-2f48-4348-81d5-03b22ab9243f','binding','issue','a4b5bf76-1eb1-4ecb-bef7-a6292fc7692d',NULL,NULL,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc',3,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request','keryx-peer-n6',NULL,'n6-test-agent')",
             [],
         )
         .unwrap();
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('a4b5bf76-1eb1-4ecb-bef7-a6292fc7692d','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756',NULL,3,1,'pending',2000,NULL,NULL,NULL,NULL,NULL,'d494ab4f-20db-4a4f-97bf-aad97f5ac36b','n6-test-agent','82ebd534-9d72-421e-a732-605a30fabf9a','8e041ede-2f48-4348-81d5-03b22ab9243f')",
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('a4b5bf76-1eb1-4ecb-bef7-a6292fc7692d','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','11111111-1111-4111-8111-111111111111',NULL,3,1,'pending',2000,NULL,NULL,NULL,NULL,NULL,'d494ab4f-20db-4a4f-97bf-aad97f5ac36b','n6-test-agent','82ebd534-9d72-421e-a732-605a30fabf9a','8e041ede-2f48-4348-81d5-03b22ab9243f')",
             [],
         ),
         "generation skip or fake predecessor",
@@ -623,8 +764,8 @@ fn direct_sql_requires_exact_provenance_decisions_and_immutable_lifecycle() {
     );
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('6e8cc954-2ca4-43d8-ad47-5497ae9bd757','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756','keryx-peer-other',2,1,'active',2100,'n6-test-agent','missing','missing')",
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('6e8cc954-2ca4-43d8-ad47-5497ae9bd757','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','11111111-1111-4111-8111-111111111111','keryx-peer-other',2,1,'active',2100,'n6-test-agent','missing','missing')",
             [],
         ),
         "duplicate active binding",
@@ -649,15 +790,15 @@ fn challenges_authorizations_and_decisions_are_append_only_and_one_shot() {
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('d14eb9f2-c231-44b3-93ed-4a29c0539df9','26a28b7e-2de9-4ff7-8c6b-60b766160831','challenge','issue','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','6a0e1b0e-3aa3-4092-b8cc-632e83347063',NULL,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756',1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request','keryx-peer-n6',NULL,'n6-test-agent')",
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('d14eb9f2-c231-44b3-93ed-4a29c0539df9','26a28b7e-2de9-4ff7-8c6b-60b766160831','challenge','issue','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','6a0e1b0e-3aa3-4092-b8cc-632e83347063',NULL,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc',1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request','keryx-peer-n6',NULL,'n6-test-agent')",
             [],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,consumed_at_ms,invalidated_at_ms,expired_at_ms,consumed_operation_id,consumed_authenticated_peer_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('6a0e1b0e-3aa3-4092-b8cc-632e83347063','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756','keryx-peer-n6',1,?1,'pending',2000,3000,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','d14eb9f2-c231-44b3-93ed-4a29c0539df9','26a28b7e-2de9-4ff7-8c6b-60b766160831')",
+            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,consumed_at_ms,invalidated_at_ms,expired_at_ms,consumed_operation_id,consumed_authenticated_peer_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('6a0e1b0e-3aa3-4092-b8cc-632e83347063','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','keryx-peer-n6',1,?1,'pending',2000,3000,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','d14eb9f2-c231-44b3-93ed-4a29c0539df9','26a28b7e-2de9-4ff7-8c6b-60b766160831')",
             [VERIFIER],
         )
         .unwrap();
@@ -692,8 +833,8 @@ fn challenges_authorizations_and_decisions_are_append_only_and_one_shot() {
     );
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('92e08ad3-443d-48b4-914c-4a0121a46b7c','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756','keryx-peer-n6',1,'not-an-argon2id-verifier','pending',2000,3000,'n6-test-agent','d14eb9f2-c231-44b3-93ed-4a29c0539df9','26a28b7e-2de9-4ff7-8c6b-60b766160831')",
+            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('92e08ad3-443d-48b4-914c-4a0121a46b7c','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','keryx-peer-n6',1,'not-an-argon2id-verifier','pending',2000,3000,'n6-test-agent','d14eb9f2-c231-44b3-93ed-4a29c0539df9','26a28b7e-2de9-4ff7-8c6b-60b766160831')",
             [],
         ),
         "strict Argon2id verifier",
@@ -707,8 +848,8 @@ fn challenges_authorizations_and_decisions_are_append_only_and_one_shot() {
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('9d276e27-eec7-4e4f-a2a9-3a6cec9153f4','a7494b27-d3e5-4905-bd9c-4aa9d94be38d','challenge','confirm','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','6a0e1b0e-3aa3-4092-b8cc-632e83347063',NULL,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756',1,'pending','consumed',1,2,2100,'nodescale',NULL,'operator_request','keryx-peer-n6','operation-n6','n6-test-agent')",
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('9d276e27-eec7-4e4f-a2a9-3a6cec9153f4','a7494b27-d3e5-4905-bd9c-4aa9d94be38d','challenge','confirm','d494ab4f-20db-4a4f-97bf-aad97f5ac36b','6a0e1b0e-3aa3-4092-b8cc-632e83347063',NULL,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc',1,'pending','consumed',1,2,2100,'nodescale',NULL,'operator_request','keryx-peer-n6','operation-n6','n6-test-agent')",
             [],
         )
         .unwrap();
@@ -759,16 +900,16 @@ fn replay_decisions_require_exact_consumed_challenge_provenance_and_are_audit_on
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('25a6bd87-6dd4-4daa-aa0c-59596fc342cb','848f97c0-52fe-4078-9895-5c5948371aa8','challenge','issue',?1,'8f2daa38-de99-4db2-9cd0-94074c7c8b98',NULL,?2,?3,?4,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',?5,NULL,'n6-test-agent')",
-            params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('25a6bd87-6dd4-4daa-aa0c-59596fc342cb','848f97c0-52fe-4078-9895-5c5948371aa8','challenge','issue',?1,'8f2daa38-de99-4db2-9cd0-94074c7c8b98',NULL,?2,?3,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',?4,NULL,'n6-test-agent')",
+            params![BINDING, NETWORK, DEVICE, PEER],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,consumed_at_ms,invalidated_at_ms,expired_at_ms,consumed_operation_id,consumed_authenticated_peer_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('8f2daa38-de99-4db2-9cd0-94074c7c8b98',?1,?2,?3,?4,?5,1,?6,'pending',2000,3000,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','25a6bd87-6dd4-4daa-aa0c-59596fc342cb','848f97c0-52fe-4078-9895-5c5948371aa8')",
-            params![BINDING, NETWORK, DEVICE, SESSION, PEER, VERIFIER],
+            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,consumed_at_ms,invalidated_at_ms,expired_at_ms,consumed_operation_id,consumed_authenticated_peer_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('8f2daa38-de99-4db2-9cd0-94074c7c8b98',?1,?2,?3,?4,1,?5,'pending',2000,3000,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','25a6bd87-6dd4-4daa-aa0c-59596fc342cb','848f97c0-52fe-4078-9895-5c5948371aa8')",
+            params![BINDING, NETWORK, DEVICE, PEER, VERIFIER],
         )
         .unwrap();
     connection.execute_batch("COMMIT;").unwrap();
@@ -780,9 +921,9 @@ fn replay_decisions_require_exact_consumed_challenge_provenance_and_are_audit_on
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('215b7c5e-737b-42a2-858c-13c7c8d79c78','d9d97dba-ac7c-4fef-84e4-7a7889dbeccd','challenge','confirm',?1,'8f2daa38-de99-4db2-9cd0-94074c7c8b98',NULL,?2,?3,?4,1,'pending','consumed',1,2,2100,'nodescale',NULL,'operator_request',?5,'operation-replay','n6-test-agent')",
-            params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('215b7c5e-737b-42a2-858c-13c7c8d79c78','d9d97dba-ac7c-4fef-84e4-7a7889dbeccd','challenge','confirm',?1,'8f2daa38-de99-4db2-9cd0-94074c7c8b98',NULL,?2,?3,1,'pending','consumed',1,2,2100,'nodescale',NULL,'operator_request',?4,'operation-replay','n6-test-agent')",
+            params![BINDING, NETWORK, DEVICE, PEER],
         )
         .unwrap();
     connection
@@ -800,16 +941,16 @@ fn replay_decisions_require_exact_consumed_challenge_provenance_and_are_audit_on
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('5f86266d-78b0-4edb-b106-b59f1c6a5a2d','355de2f8-c343-43c9-ae6f-4337f6f7f3ef','challenge','issue',?1,'88914a67-1f7b-4373-adcf-ef9f6d01ca74',NULL,?2,?3,?4,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',?5,NULL,'n6-test-agent')",
-            params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('5f86266d-78b0-4edb-b106-b59f1c6a5a2d','355de2f8-c343-43c9-ae6f-4337f6f7f3ef','challenge','issue',?1,'88914a67-1f7b-4373-adcf-ef9f6d01ca74',NULL,?2,?3,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',?4,NULL,'n6-test-agent')",
+            params![BINDING, NETWORK, DEVICE, PEER],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,consumed_at_ms,invalidated_at_ms,expired_at_ms,consumed_operation_id,consumed_authenticated_peer_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('88914a67-1f7b-4373-adcf-ef9f6d01ca74',?1,?2,?3,?4,?5,1,?6,'pending',2000,3000,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','5f86266d-78b0-4edb-b106-b59f1c6a5a2d','355de2f8-c343-43c9-ae6f-4337f6f7f3ef')",
-            params![BINDING, NETWORK, DEVICE, SESSION, PEER, VERIFIER],
+            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,consumed_at_ms,invalidated_at_ms,expired_at_ms,consumed_operation_id,consumed_authenticated_peer_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('88914a67-1f7b-4373-adcf-ef9f6d01ca74',?1,?2,?3,?4,1,?5,'pending',2000,3000,NULL,NULL,NULL,NULL,NULL,'n6-test-agent','5f86266d-78b0-4edb-b106-b59f1c6a5a2d','355de2f8-c343-43c9-ae6f-4337f6f7f3ef')",
+            params![BINDING, NETWORK, DEVICE, PEER, VERIFIER],
         )
         .unwrap();
     connection.execute_batch("COMMIT;").unwrap();
@@ -819,7 +960,7 @@ fn replay_decisions_require_exact_consumed_challenge_provenance_and_are_audit_on
                          challenge_id: &str,
                          binding_id: &str,
                          device_id: &str,
-                         join_session_id: &str,
+                         _join_session_id: &str,
                          generation: i64,
                          authenticated_peer_id: &str,
                          operation_id: &str,
@@ -831,9 +972,9 @@ fn replay_decisions_require_exact_consumed_challenge_provenance_and_are_audit_on
                          new_revision: i64| {
         insert_audit(&connection, audit_event_id, "challenge", "replay");
         connection.execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES (?1,?2,'challenge','replay',?3,?4,NULL,?5,?6,?7,?8,?9,?10,?11,?12,?13,'nodescale',NULL,'challenge_replay',?14,?15,?16)",
-            params![decision_id, audit_event_id, binding_id, challenge_id, NETWORK, device_id, join_session_id, generation, prior_state, new_state, prior_revision, new_revision, decided_at_ms, authenticated_peer_id, operation_id, agent_version],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES (?1,?2,'challenge','replay',?3,?4,NULL,?5,?6,?7,?8,?9,?10,?11,?12,'nodescale',NULL,'challenge_replay',?13,?14,?15)",
+            params![decision_id, audit_event_id, binding_id, challenge_id, NETWORK, device_id, generation, prior_state, new_state, prior_revision, new_revision, decided_at_ms, authenticated_peer_id, operation_id, agent_version],
         )
     };
 
@@ -1174,17 +1315,17 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('10ecd26e-e4c8-4a8b-9d4a-f8d0a9da7048','eb8e1e6a-7704-434e-994c-ff9d2f2b1ce1','binding','issue',?1,NULL,NULL,?2,?3,?4,2,NULL,'pending',NULL,1,2100,'nodescale',NULL,'operator_request',NULL,NULL,'n6-test-agent')",
-            params![SUCCESSOR_BINDING, NETWORK, DEVICE, SESSION],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('10ecd26e-e4c8-4a8b-9d4a-f8d0a9da7048','eb8e1e6a-7704-434e-994c-ff9d2f2b1ce1','binding','issue',?1,NULL,NULL,?2,?3,2,NULL,'pending',NULL,1,2100,'nodescale',NULL,'operator_request',NULL,NULL,'n6-test-agent')",
+            params![SUCCESSOR_BINDING, NETWORK, DEVICE],
         )
         .unwrap();
 
     connection
         .execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES (?1,?2,?3,?4,NULL,2,1,'pending',2100,NULL,NULL,NULL,NULL,NULL,?5,'2363759c-3fd8-4305-ac97-1558e98b9192','n6-test-agent','10ecd26e-e4c8-4a8b-9d4a-f8d0a9da7048','eb8e1e6a-7704-434e-994c-ff9d2f2b1ce1')",
-            params![SUCCESSOR_BINDING, NETWORK, DEVICE, SESSION, BINDING],
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES (?1,?2,?3,'11111111-1111-4111-8111-111111111111',NULL,2,1,'pending',2100,NULL,NULL,NULL,NULL,NULL,?4,'2363759c-3fd8-4305-ac97-1558e98b9192','n6-test-agent','10ecd26e-e4c8-4a8b-9d4a-f8d0a9da7048','eb8e1e6a-7704-434e-994c-ff9d2f2b1ce1')",
+            params![SUCCESSOR_BINDING, NETWORK, DEVICE, BINDING],
         )
         .unwrap();
     connection.execute_batch("COMMIT;").unwrap();
@@ -1200,12 +1341,12 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
         "issue",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('1ee7b97d-9680-4178-b712-7702831f58a0','41bb206b-5f89-4eff-b3f7-263895452351','challenge','issue',?1,'99d6b73c-728e-41c9-826f-17768d9b7d94',NULL,?2,?3,?4,2,NULL,'pending',NULL,1,2150,'nodescale',NULL,'challenge_issued',?5,NULL,'n6-test-agent')",
-        params![SUCCESSOR_BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('1ee7b97d-9680-4178-b712-7702831f58a0','41bb206b-5f89-4eff-b3f7-263895452351','challenge','issue',?1,'99d6b73c-728e-41c9-826f-17768d9b7d94',NULL,?2,?3,2,NULL,'pending',NULL,1,2150,'nodescale',NULL,'challenge_issued',?4,NULL,'n6-test-agent')",
+        params![SUCCESSOR_BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     connection.execute(
-        "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES ('99d6b73c-728e-41c9-826f-17768d9b7d94',?1,?2,?3,?4,?5,2,?6,'pending',2150,3000,'n6-test-agent','1ee7b97d-9680-4178-b712-7702831f58a0','41bb206b-5f89-4eff-b3f7-263895452351')",
-        params![SUCCESSOR_BINDING, NETWORK, DEVICE, SESSION, PEER, VERIFIER],
+        "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES ('99d6b73c-728e-41c9-826f-17768d9b7d94',?1,?2,?3,?4,2,?5,'pending',2150,3000,'n6-test-agent','1ee7b97d-9680-4178-b712-7702831f58a0','41bb206b-5f89-4eff-b3f7-263895452351')",
+        params![SUCCESSOR_BINDING, NETWORK, DEVICE, PEER, VERIFIER],
     ).unwrap();
     connection.execute_batch("COMMIT;").unwrap();
     insert_audit_for_decision(
@@ -1218,8 +1359,8 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
         "confirm",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('474e161f-dd89-42e3-9aa6-cfaa2b7efeea','80a45975-81dd-4590-ab55-ee7a7166e4b2','challenge','confirm',?1,'99d6b73c-728e-41c9-826f-17768d9b7d94',NULL,?2,?3,?4,2,'pending','consumed',1,2,2200,'nodescale',NULL,'challenge_confirmed',?5,'operation-rotation-g2','n6-test-agent')",
-        params![SUCCESSOR_BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('474e161f-dd89-42e3-9aa6-cfaa2b7efeea','80a45975-81dd-4590-ab55-ee7a7166e4b2','challenge','confirm',?1,'99d6b73c-728e-41c9-826f-17768d9b7d94',NULL,?2,?3,2,'pending','consumed',1,2,2200,'nodescale',NULL,'challenge_confirmed',?4,'operation-rotation-g2','n6-test-agent')",
+        params![SUCCESSOR_BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     connection.execute(
         "UPDATE n6_binding_challenges SET challenge_state='consumed',consumed_at_ms=2200,consumed_operation_id='operation-rotation-g2',consumed_authenticated_peer_id=?1,last_decision_id='474e161f-dd89-42e3-9aa6-cfaa2b7efeea',last_audit_event_id='80a45975-81dd-4590-ab55-ee7a7166e4b2' WHERE challenge_id='99d6b73c-728e-41c9-826f-17768d9b7d94'",
@@ -1235,8 +1376,8 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
         "confirm",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('2163e01e-ebe6-46fd-a961-655439fc190d','0a6911f2-41dc-4178-9b66-cb3d8bab0623','binding','confirm',?1,'99d6b73c-728e-41c9-826f-17768d9b7d94',NULL,?2,?3,?4,2,'pending','active',1,2,2200,'nodescale',NULL,'challenge_confirmed',?5,'operation-rotation-g2','n6-test-agent')",
-        params![SUCCESSOR_BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('2163e01e-ebe6-46fd-a961-655439fc190d','0a6911f2-41dc-4178-9b66-cb3d8bab0623','binding','confirm',?1,'99d6b73c-728e-41c9-826f-17768d9b7d94',NULL,?2,?3,2,'pending','active',1,2,2200,'nodescale',NULL,'challenge_confirmed',?4,'operation-rotation-g2','n6-test-agent')",
+        params![SUCCESSOR_BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     assert_rejected(
         connection.execute("UPDATE n6_binding_records SET binding_state='active',verified_peer_id=?1,revision=2,confirmed_at_ms=2200,last_verified_at_ms=2200,last_decision_id='2163e01e-ebe6-46fd-a961-655439fc190d',last_audit_event_id='0a6911f2-41dc-4178-9b66-cb3d8bab0623' WHERE binding_id=?2", params![PEER, SUCCESSOR_BINDING]),
@@ -1255,8 +1396,8 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
         "revoke",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('6b4c06cd-e0fc-4e33-9608-a02746c739e4','f1a2b719-f9d4-4aa2-a8b5-887f554282df','binding','revoke',?1,NULL,'d202edf9-2617-4e30-827a-3065a0b03589',?2,?3,?4,1,'active','revoked',2,3,2200,'nodescale',NULL,'operator_request',?5,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('6b4c06cd-e0fc-4e33-9608-a02746c739e4','f1a2b719-f9d4-4aa2-a8b5-887f554282df','binding','revoke',?1,NULL,'d202edf9-2617-4e30-827a-3065a0b03589',?2,?3,1,'active','revoked',2,3,2200,'nodescale',NULL,'operator_request',?4,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     assert_rejected(
         connection.execute(
@@ -1273,8 +1414,8 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
         "rotate",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('6d99df6b-cbbe-4e04-be4d-be85f5d7e3ab','d35f0441-e761-4531-b622-c8f2f0f4fcc9','binding','rotate',?1,NULL,'2363759c-3fd8-4305-ac97-1558e98b9192',?2,?3,?4,1,'active','rotated',2,3,2200,'nodescale',NULL,'operator_request',?5,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('6d99df6b-cbbe-4e04-be4d-be85f5d7e3ab','d35f0441-e761-4531-b622-c8f2f0f4fcc9','binding','rotate',?1,NULL,'2363759c-3fd8-4305-ac97-1558e98b9192',?2,?3,1,'active','rotated',2,3,2200,'nodescale',NULL,'operator_request',?4,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     assert_rejected(
         connection.execute(
@@ -1294,8 +1435,8 @@ fn rotation_successor_can_be_pending_while_predecessor_is_active() {
         "rotate",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('5c281d45-5e40-4b63-8746-dc5f6e0a7270','3c3536b6-0d7c-4c02-a6cc-2c6c4137ee69','binding','rotate',?1,NULL,'2363759c-3fd8-4305-ac97-1558e98b9192',?2,?3,?4,1,'active','rotated',2,3,2200,'operator','operator-n6','operator_request',?5,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('5c281d45-5e40-4b63-8746-dc5f6e0a7270','3c3536b6-0d7c-4c02-a6cc-2c6c4137ee69','binding','rotate',?1,NULL,'2363759c-3fd8-4305-ac97-1558e98b9192',?2,?3,1,'active','rotated',2,3,2200,'operator','operator-n6','operator_request',?4,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     assert_rejected(
         connection.execute("UPDATE n6_binding_records SET binding_state='rotated',revision=3,rotated_at_ms=2200,last_decision_id='5c281d45-5e40-4b63-8746-dc5f6e0a7270',last_audit_event_id='3c3536b6-0d7c-4c02-a6cc-2c6c4137ee69' WHERE binding_id=?1", [BINDING]),
@@ -1391,9 +1532,9 @@ fn stale_to_rotated_preserves_durable_history_and_rejects_rewrites() {
         "rotate",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES ('0e64bc13-c37a-499b-85ca-5cf0a5b28247','e5613d89-ae3a-4535-b9ec-7a64b7f9e852','binding','rotate',?1,NULL,'6c765b78-b26b-4e66-96e3-634318b2fd64',?2,?3,?4,1,'stale','rotated',3,4,2200,'operator','operator-n6','operator_request',?5,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES ('0e64bc13-c37a-499b-85ca-5cf0a5b28247','e5613d89-ae3a-4535-b9ec-7a64b7f9e852','binding','rotate',?1,NULL,'6c765b78-b26b-4e66-96e3-634318b2fd64',?2,?3,1,'stale','rotated',3,4,2200,'operator','operator-n6','operator_request',?4,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     connection.execute(
         "UPDATE n6_binding_authorizations SET authorization_state='consumed',consumed_at_ms=2200,consumed_decision_id='0e64bc13-c37a-499b-85ca-5cf0a5b28247',consumed_audit_event_id='e5613d89-ae3a-4535-b9ec-7a64b7f9e852' WHERE authorization_id='6c765b78-b26b-4e66-96e3-634318b2fd64'",
@@ -1481,9 +1622,9 @@ fn consumed_authorization_requires_a_live_matching_n5_authority() {
         "revoke",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES ('95d17a27-b94e-4d7c-9d69-3e2b29cd1804','e6c564a4-d052-421e-b92d-7ddcf96c5461','binding','revoke',?1,NULL,'16995c82-f15e-4033-8406-915fe16469b6',?2,?3,?4,1,'active','revoked',2,3,2200,'operator','operator-n6','operator_request',?5,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES ('95d17a27-b94e-4d7c-9d69-3e2b29cd1804','e6c564a4-d052-421e-b92d-7ddcf96c5461','binding','revoke',?1,NULL,'16995c82-f15e-4033-8406-915fe16469b6',?2,?3,1,'active','revoked',2,3,2200,'operator','operator-n6','operator_request',?4,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     assert_rejected(
         connection.execute(
@@ -1536,9 +1677,9 @@ fn decision_rejects_audit_business_actor_or_generation_mismatch() {
         );
         assert_rejected(
             connection.execute(
-                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-                 VALUES (?1,?2,'binding','issue','392a2b6b-47bd-4adb-83cc-ee8555ddb9f7',NULL,NULL,?3,?4,?5,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',NULL,NULL,'n6-test-agent')",
-                params![decision_id, audit_id, NETWORK, DEVICE, SESSION],
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+                 VALUES (?1,?2,'binding','issue','392a2b6b-47bd-4adb-83cc-ee8555ddb9f7',NULL,NULL,?3,?4,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',NULL,NULL,'n6-test-agent')",
+                params![decision_id, audit_id, NETWORK, DEVICE],
             ),
             "decision and audit business actor/generation mismatch",
         );
@@ -1563,16 +1704,16 @@ fn sql_agent_version_grammar_matches_the_n6_domain_boundary() {
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('989ddfc9-6a82-46ff-a30c-dea08f53c3d5','10620696-72fb-488f-86cb-8d24e1dba8f7','binding','issue','050ff538-1607-4d5a-87e4-71abd5aebab0',NULL,NULL,?1,?2,?3,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',NULL,NULL,?4)",
-            params![NETWORK, DEVICE, SESSION, valid.as_str()],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('989ddfc9-6a82-46ff-a30c-dea08f53c3d5','10620696-72fb-488f-86cb-8d24e1dba8f7','binding','issue','050ff538-1607-4d5a-87e4-71abd5aebab0',NULL,NULL,?1,?2,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',NULL,NULL,?3)",
+            params![NETWORK, DEVICE, valid.as_str()],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('050ff538-1607-4d5a-87e4-71abd5aebab0',?1,?2,?3,NULL,1,1,'pending',2000,?4,'989ddfc9-6a82-46ff-a30c-dea08f53c3d5','10620696-72fb-488f-86cb-8d24e1dba8f7')",
-            params![NETWORK, DEVICE, SESSION, valid.as_str()],
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('050ff538-1607-4d5a-87e4-71abd5aebab0',?1,?2,'11111111-1111-4111-8111-111111111111',NULL,1,1,'pending',2000,?3,'989ddfc9-6a82-46ff-a30c-dea08f53c3d5','10620696-72fb-488f-86cb-8d24e1dba8f7')",
+            params![NETWORK, DEVICE, valid.as_str()],
         )
         .unwrap();
     connection.execute_batch("COMMIT;").unwrap();
@@ -1595,9 +1736,9 @@ fn sql_agent_version_grammar_matches_the_n6_domain_boundary() {
         insert_audit(&connection, &audit_id, "binding", "issue");
         assert_rejected(
             connection.execute(
-                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-                 VALUES (?1,?2,'binding','issue',?3,NULL,NULL,?4,?5,?6,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',NULL,NULL,?7)",
-                params![decision_id, audit_id, format!("binding-invalid-agent-version-{index}"), NETWORK, DEVICE, SESSION, forbidden],
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+                 VALUES (?1,?2,'binding','issue',?3,NULL,NULL,?4,?5,1,NULL,'pending',NULL,1,2000,'nodescale',NULL,'operator_request',NULL,NULL,?6)",
+                params![decision_id, audit_id, format!("binding-invalid-agent-version-{index}"), NETWORK, DEVICE, forbidden],
             ),
             forbidden,
         );
@@ -1621,9 +1762,9 @@ fn binding_activation_requires_one_exact_consumed_challenge() {
     );
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES ('d6639c69-f764-4659-82cf-1711f6c39808','7081d445-6304-4bb0-aba2-675a144b588e','binding','confirm',?1,NULL,NULL,?2,?3,?4,1,'pending','active',1,2,2100,'nodescale',NULL,'challenge_confirmed',?5,'operation-n6','n6-test-agent')",
-            params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES ('d6639c69-f764-4659-82cf-1711f6c39808','7081d445-6304-4bb0-aba2-675a144b588e','binding','confirm',?1,NULL,NULL,?2,?3,1,'pending','active',1,2,2100,'nodescale',NULL,'challenge_confirmed',?4,'operation-n6','n6-test-agent')",
+            params![BINDING, NETWORK, DEVICE, PEER],
         ),
         "binding confirmation decision without a consumed challenge",
     );
@@ -1650,8 +1791,8 @@ fn sql_n6_uuid_and_argon2_phc_shapes_are_exact() {
 
     let insert = |challenge_id: String, verifier: &str| {
         connection.execute(
-            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,join_session_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,?5,'keryx-peer-n6',1,?6,'pending',1000,2000,'n6-test-agent',?7,?8)",
-            params![challenge_id, n6_uuid(), n6_uuid(), n6_uuid(), n6_uuid(), verifier, n6_uuid(), n6_uuid()],
+            "INSERT INTO n6_binding_challenges (challenge_id,binding_id,network_id,device_id,expected_authenticated_peer_id,generation,challenge_verifier,challenge_state,issued_at_ms,expires_at_ms,agent_version,last_decision_id,last_audit_event_id) VALUES (?1,?2,?3,?4,'keryx-peer-n6',1,?5,'pending',1000,2000,'n6-test-agent',?6,?7)",
+            params![challenge_id, n6_uuid(), n6_uuid(), n6_uuid(), verifier, n6_uuid(), n6_uuid()],
         )
     };
     insert(n6_uuid(), VERIFIER).unwrap();
@@ -1714,8 +1855,8 @@ fn sql_binding_state_check_requires_verification_for_confirmed_evidence() {
     ] {
         assert_rejected(
             connection.execute(
-                "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id)
-                 VALUES (?1,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756','peer-n6',1,1,?2,1000,1500,?3,?4,?5,NULL,NULL,NULL,'nodescale-agent:6.0.0',?6,?7)",
+                "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id)
+                 VALUES (?1,'10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','11111111-1111-4111-8111-111111111111','peer-n6',1,1,?2,1000,1500,?3,?4,?5,NULL,NULL,NULL,'nodescale-agent:6.0.0',?6,?7)",
                 params![format!("binding-missing-verification-{index}"), state, stale_at_ms, rotated_at_ms, revoked_at_ms, format!("decision-missing-verification-{index}"), format!("audit-missing-verification-{index}")],
             ),
             state,
@@ -1724,8 +1865,8 @@ fn sql_binding_state_check_requires_verification_for_confirmed_evidence() {
 
     connection
         .execute(
-            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,join_session_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id)
-             VALUES ('885ded61-1e2b-4b98-b861-2a2b27c3a533','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','cafa4427-4c17-408e-bfed-c93f34bd3756',NULL,1,2,'revoked',1000,NULL,NULL,NULL,2000,NULL,NULL,NULL,'nodescale-agent:6.0.0','406143dc-598d-49d0-8b49-3e8bc8817846','39da141a-e7a6-424d-ba7f-60c2aebb6d0d')",
+            "INSERT INTO n6_binding_records (binding_id,network_id,device_id,n5_provider_binding_id,verified_peer_id,generation,revision,binding_state,created_at_ms,confirmed_at_ms,stale_at_ms,rotated_at_ms,revoked_at_ms,last_verified_at_ms,rotated_from_binding_id,rotation_authorization_id,agent_version,last_decision_id,last_audit_event_id)
+             VALUES ('885ded61-1e2b-4b98-b861-2a2b27c3a533','10bdbae2-73be-46f2-8f0a-5b761fdeaf4d','f9b36c3a-e777-4e92-a4ea-14d22a234ecc','11111111-1111-4111-8111-111111111111',NULL,1,2,'revoked',1000,NULL,NULL,NULL,2000,NULL,NULL,NULL,'nodescale-agent:6.0.0','406143dc-598d-49d0-8b49-3e8bc8817846','39da141a-e7a6-424d-ba7f-60c2aebb6d0d')",
             [],
         )
         .unwrap();
@@ -1770,9 +1911,9 @@ fn n5_activate_device_trust_alone_cannot_issue_n6_rotate_authorization() {
 
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,join_session_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,authorization_state,consumed_at_ms,consumed_decision_id,consumed_audit_event_id)
-             VALUES ('b1dfdc16-26b0-4401-a8b0-138a0d19f037','71e08e3f-0cd5-4f12-b21e-ec343b332a71',?1,?2,?3,?4,1,2,'rotate','operator','operator-n6',2000,3000,'pending',NULL,NULL,NULL)",
-            params![BINDING, NETWORK, DEVICE, SESSION],
+            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,authorization_state,consumed_at_ms,consumed_decision_id,consumed_audit_event_id)
+             VALUES ('b1dfdc16-26b0-4401-a8b0-138a0d19f037','71e08e3f-0cd5-4f12-b21e-ec343b332a71',?1,?2,?3,1,2,'rotate','operator','operator-n6',2000,3000,'pending',NULL,NULL,NULL)",
+            params![BINDING, NETWORK, DEVICE],
         ),
         "N5 ActivateDeviceTrust alone must not issue N6 rotate authorization",
     );
@@ -1817,8 +1958,8 @@ fn authorization_lifecycle_requires_settlement_evidence_and_releases_only_settle
     );
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,join_session_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,authorization_state) VALUES ('d3677d34-dbe6-4342-9d88-97f6bd957e1b','6033e8e2-c7ba-4100-a75c-dda7de7db8a7',?1,?2,?3,?4,1,2,'rotate','operator','operator-n6',2000,2200,'pending')",
-            params![BINDING, NETWORK, DEVICE, SESSION],
+            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,authorization_state) VALUES ('d3677d34-dbe6-4342-9d88-97f6bd957e1b','6033e8e2-c7ba-4100-a75c-dda7de7db8a7',?1,?2,?3,1,2,'rotate','operator','operator-n6',2000,2200,'pending')",
+            params![BINDING, NETWORK, DEVICE],
         ),
         "expired but unsettled pending authorization blocks replacement",
     );
@@ -1833,9 +1974,9 @@ fn authorization_lifecycle_requires_settlement_evidence_and_releases_only_settle
         "expire",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES ('f63075d3-a96b-4fcf-ab72-eb06a3e2a927','65b4d5c6-644a-4487-b850-4cceea2d144e','authorization','expire',?1,NULL,'0281770a-2c38-40c0-b714-c95e36937311',?2,?3,?4,1,'pending','expired',2,3,2100,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES ('f63075d3-a96b-4fcf-ab72-eb06a3e2a927','65b4d5c6-644a-4487-b850-4cceea2d144e','authorization','expire',?1,NULL,'0281770a-2c38-40c0-b714-c95e36937311',?2,?3,1,'pending','expired',2,3,2100,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE],
     ).unwrap();
     connection.execute(
         "UPDATE n6_binding_authorizations SET authorization_state='expired',expired_at_ms=2100,expired_decision_id='f63075d3-a96b-4fcf-ab72-eb06a3e2a927',expired_audit_event_id='65b4d5c6-644a-4487-b850-4cceea2d144e' WHERE authorization_id='0281770a-2c38-40c0-b714-c95e36937311'",
@@ -1868,9 +2009,9 @@ fn authorization_lifecycle_requires_settlement_evidence_and_releases_only_settle
         "invalidate",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES ('eecbd34b-5a11-4e2e-a311-ad2364802811','7a903c15-8c37-4301-bc42-9ed07a0b0964','authorization','invalidate',?1,NULL,'d3677d34-dbe6-4342-9d88-97f6bd957e1b',?2,?3,?4,1,'pending','invalidated',2,3,2050,'operator','operator-n6','authorization_invalidated',NULL,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES ('eecbd34b-5a11-4e2e-a311-ad2364802811','7a903c15-8c37-4301-bc42-9ed07a0b0964','authorization','invalidate',?1,NULL,'d3677d34-dbe6-4342-9d88-97f6bd957e1b',?2,?3,1,'pending','invalidated',2,3,2050,'operator','operator-n6','authorization_invalidated',NULL,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE],
     ).unwrap();
     connection
         .execute(
@@ -1930,8 +2071,8 @@ fn authorization_lifecycle_requires_settlement_evidence_and_releases_only_settle
         "expire",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('3b0b24d6-5401-4e09-b9ef-84e24c6acb18','fdcdcaef-dd49-4c09-9830-d8e7c1393382','authorization','expire',?1,NULL,'b31a88cf-30d7-4c8b-b5c3-87fb6516b020',?2,?3,?4,1,'pending','expired',2,3,2300,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('3b0b24d6-5401-4e09-b9ef-84e24c6acb18','fdcdcaef-dd49-4c09-9830-d8e7c1393382','authorization','expire',?1,NULL,'b31a88cf-30d7-4c8b-b5c3-87fb6516b020',?2,?3,1,'pending','expired',2,3,2300,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE],
     ).unwrap();
     connection.execute(
         "UPDATE n6_binding_authorizations SET authorization_state='expired',expired_at_ms=2300,expired_decision_id='3b0b24d6-5401-4e09-b9ef-84e24c6acb18',expired_audit_event_id='fdcdcaef-dd49-4c09-9830-d8e7c1393382' WHERE authorization_id='b31a88cf-30d7-4c8b-b5c3-87fb6516b020'",
@@ -1966,9 +2107,9 @@ fn decisions_require_closed_subject_grammar_exact_semantic_audits_and_public_met
             _ => (Some("pending"), "pending", Some(1), 2),
         };
         connection.execute(
-            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?13,?14,2000,'nodescale',NULL,'semantic_audit_test',NULL,NULL,'n6-test-agent')",
-            params![decision_id, audit_event_id, subject_kind, decision_kind, BINDING, challenge_id, authorization_id, NETWORK, DEVICE, SESSION, prior_state, new_state, prior_revision, new_revision],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10,?11,?12,?13,2000,'nodescale',NULL,'semantic_audit_test',NULL,NULL,'n6-test-agent')",
+            params![decision_id, audit_event_id, subject_kind, decision_kind, BINDING, challenge_id, authorization_id, NETWORK, DEVICE, prior_state, new_state, prior_revision, new_revision],
         )
     };
 
@@ -2231,9 +2372,9 @@ fn n6_authority_use_requires_a_live_matching_owner_root_at_each_boundary() {
     );
     assert_rejected(
         connection.execute(
-            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,join_session_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,authorization_state)
-             VALUES ('9f5215b0-ca83-44e9-a47e-89f0bda2c8e9','6033e8e2-c7ba-4100-a75c-dda7de7db8a7',?1,?2,?3,?4,1,2,'revoke','operator','operator-n6',2200,3000,'pending')",
-            params![BINDING, NETWORK, DEVICE, SESSION],
+            "INSERT INTO n6_binding_authorizations (authorization_id,authority_id,binding_id,network_id,device_id,generation,expected_revision,action_kind,actor_source,actor_id,issued_at_ms,expires_at_ms,authorization_state)
+             VALUES ('9f5215b0-ca83-44e9-a47e-89f0bda2c8e9','6033e8e2-c7ba-4100-a75c-dda7de7db8a7',?1,?2,?3,1,2,'revoke','operator','operator-n6',2200,3000,'pending')",
+            params![BINDING, NETWORK, DEVICE],
         ),
         "revoked owner root cannot issue an N6 authorization through its still-live child authority",
     );
@@ -2248,9 +2389,9 @@ fn n6_authority_use_requires_a_live_matching_owner_root_at_each_boundary() {
         "rotate",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES ('b04e0b60-518a-44c5-b525-7a69a0bf556a','5eb926da-4ea6-493a-8a12-a98d8cddfe2c','binding','rotate',?1,NULL,'a11f1b80-99e3-446c-953d-5480b1eeb7ac',?2,?3,?4,1,'active','rotated',2,3,2200,'operator','operator-n6','operator_request',?5,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION, PEER],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES ('b04e0b60-518a-44c5-b525-7a69a0bf556a','5eb926da-4ea6-493a-8a12-a98d8cddfe2c','binding','rotate',?1,NULL,'a11f1b80-99e3-446c-953d-5480b1eeb7ac',?2,?3,1,'active','rotated',2,3,2200,'operator','operator-n6','operator_request',?4,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE, PEER],
     ).unwrap();
     assert_rejected(
         connection.execute(
@@ -2270,9 +2411,9 @@ fn n6_authority_use_requires_a_live_matching_owner_root_at_each_boundary() {
         "expire",
     );
     connection.execute(
-        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,join_session_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
-         VALUES ('3b114bf1-58e1-44f1-bd86-ca77b9f707a2','37b5a02e-72b6-43a1-9e52-2b4acb6e3e3a','authorization','expire',?1,NULL,'a11f1b80-99e3-446c-953d-5480b1eeb7ac',?2,?3,?4,1,'pending','expired',2,3,3000,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
-        params![BINDING, NETWORK, DEVICE, SESSION],
+        "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version)
+         VALUES ('3b114bf1-58e1-44f1-bd86-ca77b9f707a2','37b5a02e-72b6-43a1-9e52-2b4acb6e3e3a','authorization','expire',?1,NULL,'a11f1b80-99e3-446c-953d-5480b1eeb7ac',?2,?3,1,'pending','expired',2,3,3000,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
+        params![BINDING, NETWORK, DEVICE],
     ).unwrap();
     connection.execute(
         "UPDATE n6_binding_authorizations SET authorization_state='expired',expired_at_ms=3000,expired_decision_id='3b114bf1-58e1-44f1-bd86-ca77b9f707a2',expired_audit_event_id='37b5a02e-72b6-43a1-9e52-2b4acb6e3e3a' WHERE authorization_id='a11f1b80-99e3-446c-953d-5480b1eeb7ac'",
@@ -2303,11 +2444,11 @@ fn two_connection_begin_immediate_duplicate_challenge_confirmation_leaves_no_los
     }
     winner.execute_batch(&format!("BEGIN IMMEDIATE;
         INSERT INTO audit_events VALUES ('{winner_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','nodescale',NULL,'keryx_binding_attempted','success',1,'{{}}');
-        INSERT INTO n6_binding_decisions VALUES ('{winner_decision}','{winner_audit}','challenge','confirm','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}','{SESSION}',1,'pending','consumed',1,2,2100,'nodescale',NULL,'challenge_confirmed','{PEER}','race-confirm','n6-test-agent');
+        INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{winner_decision}','{winner_audit}','challenge','confirm','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}',1,'pending','consumed',1,2,2100,'nodescale',NULL,'challenge_confirmed','{PEER}','race-confirm','n6-test-agent');
         UPDATE n6_binding_challenges SET challenge_state='consumed',consumed_at_ms=2100,consumed_operation_id='race-confirm',consumed_authenticated_peer_id='{PEER}',last_decision_id='{winner_decision}',last_audit_event_id='{winner_audit}' WHERE challenge_id='{challenge_id}'; COMMIT;")).unwrap();
     assert!(loser.execute_batch(&format!("BEGIN IMMEDIATE;
         INSERT INTO audit_events VALUES ('{loser_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','nodescale',NULL,'keryx_binding_attempted','success',1,'{{}}');
-        INSERT INTO n6_binding_decisions VALUES ('{loser_decision}','{loser_audit}','challenge','confirm','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}','{SESSION}',1,'pending','consumed',1,2,2200,'nodescale',NULL,'challenge_confirmed','{PEER}','race-confirm','n6-test-agent');")).is_err());
+        INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{loser_decision}','{loser_audit}','challenge','confirm','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}',1,'pending','consumed',1,2,2200,'nodescale',NULL,'challenge_confirmed','{PEER}','race-confirm','n6-test-agent');")).is_err());
     loser.execute_batch("ROLLBACK").unwrap();
     let inspect = Connection::open(path).unwrap();
     let loser_evidence: i64 = inspect
@@ -2353,12 +2494,12 @@ fn two_connection_begin_immediate_rotate_revoke_loser_leaves_no_success_or_consu
     }
     winner.execute_batch(&format!("BEGIN IMMEDIATE;
         INSERT INTO audit_events VALUES ('{rotate_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','operator','operator-n6','keryx_binding_rotated','success',1,'{{}}');
-        INSERT INTO n6_binding_decisions VALUES ('{rotate_decision}','{rotate_audit}','binding','rotate','{BINDING}',NULL,'{rotate_auth}','{NETWORK}','{DEVICE}','{SESSION}',1,'active','rotated',2,3,2200,'operator','operator-n6','race_rotate','{PEER}',NULL,'n6-test-agent');
+        INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{rotate_decision}','{rotate_audit}','binding','rotate','{BINDING}',NULL,'{rotate_auth}','{NETWORK}','{DEVICE}',1,'active','rotated',2,3,2200,'operator','operator-n6','race_rotate','{PEER}',NULL,'n6-test-agent');
         UPDATE n6_binding_authorizations SET authorization_state='consumed',consumed_at_ms=2200,consumed_decision_id='{rotate_decision}',consumed_audit_event_id='{rotate_audit}' WHERE authorization_id='{rotate_auth}';
         UPDATE n6_binding_records SET binding_state='rotated',revision=3,rotated_at_ms=2200,last_decision_id='{rotate_decision}',last_audit_event_id='{rotate_audit}' WHERE binding_id='{BINDING}'; COMMIT;")).unwrap();
     assert!(loser.execute_batch(&format!("BEGIN IMMEDIATE;
         INSERT INTO audit_events VALUES ('{revoke_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','operator','operator-n6','keryx_binding_revoked','success',1,'{{}}');
-        INSERT INTO n6_binding_decisions VALUES ('{revoke_decision}','{revoke_audit}','binding','revoke','{BINDING}',NULL,'{revoke_auth}','{NETWORK}','{DEVICE}','{SESSION}',1,'active','revoked',2,3,2201,'operator','operator-n6','race_revoke','{PEER}',NULL,'n6-test-agent');")).is_err());
+        INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{revoke_decision}','{revoke_audit}','binding','revoke','{BINDING}',NULL,'{revoke_auth}','{NETWORK}','{DEVICE}',1,'active','revoked',2,3,2201,'operator','operator-n6','race_revoke','{PEER}',NULL,'n6-test-agent');")).is_err());
     loser.execute_batch("ROLLBACK").unwrap();
     let inspect = Connection::open(path).unwrap();
     let loser_evidence: i64 = inspect
@@ -2407,7 +2548,7 @@ fn cleanup_decisions_require_exact_live_pending_subjects_and_rollback_loser_evid
         .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{premature_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','nodescale',NULL,'keryx_binding_nonce_expired','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{premature_decision}','{premature_audit}','challenge','expire','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}','{SESSION}',1,'pending','expired',1,2,2999,'nodescale',NULL,'challenge_expired',NULL,NULL,'n6-test-agent');"
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{premature_decision}','{premature_audit}','challenge','expire','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}',1,'pending','expired',1,2,2999,'nodescale',NULL,'challenge_expired',NULL,NULL,'n6-test-agent');"
         ))
         .is_err());
     connection.execute_batch("ROLLBACK").unwrap();
@@ -2425,7 +2566,7 @@ fn cleanup_decisions_require_exact_live_pending_subjects_and_rollback_loser_evid
         .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{grammar_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','nodescale',NULL,'keryx_binding_attempted','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{grammar_decision}','{grammar_audit}','challenge','confirm','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}','{SESSION}',1,'pending','active',1,2,2100,'nodescale',NULL,'challenge_confirmed','{PEER}','wrong-confirm-state','n6-test-agent');"
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{grammar_decision}','{grammar_audit}','challenge','confirm','{BINDING}','{challenge_id}',NULL,'{NETWORK}','{DEVICE}',1,'pending','active',1,2,2100,'nodescale',NULL,'challenge_confirmed','{PEER}','wrong-confirm-state','n6-test-agent');"
         ))
         .is_err());
     connection.execute_batch("ROLLBACK").unwrap();
@@ -2443,7 +2584,7 @@ fn cleanup_decisions_require_exact_live_pending_subjects_and_rollback_loser_evid
         .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{nonexistent_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','nodescale',NULL,'keryx_binding_nonce_invalidated','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{nonexistent_decision}','{nonexistent_audit}','challenge','invalidate','{BINDING}','{}',NULL,'{NETWORK}','{DEVICE}','{SESSION}',1,'pending','invalidated',1,2,2100,'nodescale',NULL,'challenge_invalidated',NULL,NULL,'n6-test-agent');",
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{nonexistent_decision}','{nonexistent_audit}','challenge','invalidate','{BINDING}','{}',NULL,'{NETWORK}','{DEVICE}',1,'pending','invalidated',1,2,2100,'nodescale',NULL,'challenge_invalidated',NULL,NULL,'n6-test-agent');",
             n6_uuid()
         ))
         .is_err());
@@ -2477,7 +2618,7 @@ fn authorization_cleanup_requires_live_pending_authorization_and_accepted_actor(
         .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{premature_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','operator','operator-n6','keryx_binding_authorization_expired','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{premature_decision}','{premature_audit}','authorization','expire','{BINDING}',NULL,'{authorization_id}','{NETWORK}','{DEVICE}','{SESSION}',1,'pending','expired',2,3,2999,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent');"
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{premature_decision}','{premature_audit}','authorization','expire','{BINDING}',NULL,'{authorization_id}','{NETWORK}','{DEVICE}',1,'pending','expired',2,3,2999,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent');"
         ))
         .is_err());
     connection.execute_batch("ROLLBACK").unwrap();
@@ -2502,8 +2643,8 @@ fn authorization_cleanup_requires_live_pending_authorization_and_accepted_actor(
     );
     connection
         .execute(
-            "INSERT INTO n6_binding_decisions VALUES (?1,?2,'authorization','expire',?3,NULL,?4,?5,?6,?7,1,'pending','expired',2,3,3000,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
-            params![expiry_decision, expiry_audit, BINDING, authorization_id, NETWORK, DEVICE, SESSION],
+            "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,'authorization','expire',?3,NULL,?4,?5,?6,1,'pending','expired',2,3,3000,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent')",
+            params![expiry_decision, expiry_audit, BINDING, authorization_id, NETWORK, DEVICE],
         )
         .unwrap();
     connection
@@ -2518,7 +2659,7 @@ fn authorization_cleanup_requires_live_pending_authorization_and_accepted_actor(
         .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{terminal_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','operator','operator-n6','keryx_binding_authorization_expired','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{terminal_decision}','{terminal_audit}','authorization','expire','{BINDING}',NULL,'{authorization_id}','{NETWORK}','{DEVICE}','{SESSION}',1,'pending','expired',2,3,3001,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent');"
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{terminal_decision}','{terminal_audit}','authorization','expire','{BINDING}',NULL,'{authorization_id}','{NETWORK}','{DEVICE}',1,'pending','expired',2,3,3001,'operator','operator-n6','authorization_expired',NULL,NULL,'n6-test-agent');"
         ))
         .is_err());
     connection.execute_batch("ROLLBACK").unwrap();
@@ -2538,7 +2679,7 @@ fn authorization_cleanup_requires_live_pending_authorization_and_accepted_actor(
         .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{invalid_audit}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','operator','operator-other','keryx_binding_authorization_invalidated','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{invalid_decision}','{invalid_audit}','authorization','invalidate','{BINDING}',NULL,'{invalidated_authorization}','{NETWORK}','{DEVICE}','{SESSION}',1,'pending','invalidated',2,3,2500,'operator','operator-other','authorization_invalidated',NULL,NULL,'n6-test-agent');"
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{invalid_decision}','{invalid_audit}','authorization','invalidate','{BINDING}',NULL,'{invalidated_authorization}','{NETWORK}','{DEVICE}',1,'pending','invalidated',2,3,2500,'operator','operator-other','authorization_invalidated',NULL,NULL,'n6-test-agent');"
         ))
         .is_err());
     connection.execute_batch("ROLLBACK").unwrap();
@@ -2608,7 +2749,7 @@ fn deferred_decision_subject_cycles_reject_orphans_and_binding_idempotency_phant
         assert!(connection.execute_batch(&format!(
             "BEGIN IMMEDIATE;
              INSERT INTO audit_events VALUES ('{audit_id}','2026-08-08T00:00:00Z','{NETWORK}','{DEVICE}','{actor_source}',{actor_id},'{event_kind}','success',1,'{{}}');
-             INSERT INTO n6_binding_decisions VALUES ('{decision_id}','{audit_id}','{subject_kind}','issue','{binding_id}',{challenge_id},{authorization_id},'{NETWORK}','{DEVICE}','{SESSION}',1,NULL,'pending',NULL,1,2000,'{actor_source}',{actor_id},'{reason}',NULL,NULL,'n6-test-agent');
+             INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES ('{decision_id}','{audit_id}','{subject_kind}','issue','{binding_id}',{challenge_id},{authorization_id},'{NETWORK}','{DEVICE}',1,NULL,'pending',NULL,1,2000,'{actor_source}',{actor_id},'{reason}',NULL,NULL,'n6-test-agent');
              COMMIT;"
         )).is_err(), "orphan {subject_kind} issue decision must fail at commit");
         connection.execute_batch("ROLLBACK").unwrap();
@@ -2620,7 +2761,7 @@ fn deferred_decision_subject_cycles_reject_orphans_and_binding_idempotency_phant
         insert_audit(&connection, &audit_id, "binding", decision_kind);
         assert_rejected(
             connection.execute(
-                "INSERT INTO n6_binding_decisions VALUES (?1,?2,'binding',?3,?4,NULL,NULL,?5,?6,?7,1,'pending','pending',1,1,2001,'nodescale',NULL,'binding_idempotency',NULL,NULL,'n6-test-agent')",
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,'binding',?3,?4,NULL,NULL,?5,?6,1,'pending','pending',1,1,2001,'nodescale',NULL,'binding_idempotency',NULL,NULL,'n6-test-agent')",
                 params![decision_id, audit_id, decision_kind, n6_uuid(), NETWORK, DEVICE, SESSION],
             ),
             "phantom binding replay/conflict",
@@ -2637,7 +2778,7 @@ fn deferred_decision_subject_cycles_reject_orphans_and_binding_idempotency_phant
         );
         assert_rejected(
             connection.execute(
-                "INSERT INTO n6_binding_decisions VALUES (?1,?2,'binding',?3,?4,NULL,NULL,?5,?6,?7,2,'pending','pending',1,1,2001,'nodescale',NULL,'binding_idempotency',NULL,NULL,'n6-test-agent')",
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,'binding',?3,?4,NULL,NULL,?5,?6,2,'pending','pending',1,1,2001,'nodescale',NULL,'binding_idempotency',NULL,NULL,'n6-test-agent')",
                 params![mismatch_decision, mismatch_audit, decision_kind, BINDING, NETWORK, DEVICE, SESSION],
             ),
             "mismatched binding replay/conflict",
@@ -2672,7 +2813,7 @@ fn n6_decision_audit_metadata_rejects_decoded_secret_values_under_any_key() {
         ).unwrap();
         assert_rejected(
             connection.execute(
-                "INSERT INTO n6_binding_decisions VALUES (?1,?2,'binding','replay',?3,NULL,NULL,?4,?5,?6,1,'pending','pending',1,1,2001,'nodescale',NULL,'binding_replay',NULL,NULL,'n6-test-agent')",
+                "INSERT INTO n6_binding_decisions (decision_id,audit_event_id,subject_kind,decision_kind,binding_id,challenge_id,authorization_id,network_id,device_id,generation,prior_state,new_state,prior_revision,new_revision,decided_at_ms,actor_source,actor_id,reason_code,authenticated_peer_id,operation_id,agent_version) VALUES (?1,?2,'binding','replay',?3,NULL,NULL,?4,?5,1,'pending','pending',1,1,2001,'nodescale',NULL,'binding_replay',NULL,NULL,'n6-test-agent')",
                 params![decision_id, audit_id, BINDING, NETWORK, DEVICE, SESSION],
             ),
             "decoded N6 audit secret value",

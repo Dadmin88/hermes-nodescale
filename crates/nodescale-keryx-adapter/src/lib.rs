@@ -13,21 +13,26 @@ use async_trait::async_trait;
 use chrono::Utc;
 use keryx_proto::v1::{
     NodescaleIdentityBindDisposition, NodescaleIdentityBindResult, NodescaleIdentityBindV1,
-    NodescaleIdentityChallengeDisposition, NodescaleIdentityChallengeResult,
-    NodescaleIdentityChallengeV1,
+    NodescaleIdentityBindV2, NodescaleIdentityChallengeDisposition,
+    NodescaleIdentityChallengeResult, NodescaleIdentityChallengeV1, NodescaleIdentityChallengeV2,
 };
 use keryx_relay::{
     AuthenticatedDirectContext, DirectControlHandlers, NodescaleIdentityBindHandler,
-    NodescaleIdentityChallengeHandler,
+    NodescaleIdentityBindV2Handler, NodescaleIdentityChallengeHandler,
+    NodescaleIdentityChallengeV2Handler,
 };
 use nodescale_domain::{
-    AgentVersion, BindingNonce, DeviceId, Generation, JoinSessionId, KeryxBindingId, KeryxPeerId,
+    AgentVersion, BindingNonce, DeviceId, Generation, KeryxBindingId, KeryxPeerId,
     N6AuthenticatedBindRequest, N6BindingChallengeDelivery, NetworkId, OperationId,
+    ProviderBindingId,
 };
 
 const INVALID_REQUEST_REASON: &str = "invalid request";
 const REJECTED_REASON: &str = "request rejected";
 const CONTROL_PLANE_ERROR_REASON: &str = "request could not be completed";
+const PROTOCOL_VERSION_ERROR_CODE: &str = "protocol_version_incompatible";
+const PROTOCOL_VERSION_ERROR_REASON: &str =
+    "typed provenance requires Nodescale control protocol V2";
 
 /// The only externally visible, fixed rejection codes the adapter emits.
 ///
@@ -151,7 +156,7 @@ pub struct ChallengeRequest {
     operation_id: OperationId,
     network_id: NetworkId,
     device_id: DeviceId,
-    join_session_id: JoinSessionId,
+    provider_binding_id: ProviderBindingId,
     agent_version: AgentVersion,
 }
 
@@ -173,8 +178,8 @@ impl ChallengeRequest {
         self.device_id
     }
     #[must_use]
-    pub fn join_session_id(&self) -> JoinSessionId {
-        self.join_session_id
+    pub fn provider_binding_id(&self) -> ProviderBindingId {
+        self.provider_binding_id
     }
     #[must_use]
     pub fn agent_version(&self) -> &AgentVersion {
@@ -335,14 +340,16 @@ impl<C: NodescaleIdentityControlPlane> TryNodescaleKeryxAdapter<C> {
         let handler: Arc<Self> = Arc::new(self.clone());
         DirectControlHandlers {
             nodescale_identity_bind_v1: Some(handler.clone()),
-            nodescale_identity_challenge_v1: Some(handler),
+            nodescale_identity_bind_v2: Some(handler.clone()),
+            nodescale_identity_challenge_v1: Some(handler.clone()),
+            nodescale_identity_challenge_v2: Some(handler),
         }
     }
 
     async fn handle_challenge(
         &self,
         context: &AuthenticatedDirectContext,
-        operation: NodescaleIdentityChallengeV1,
+        operation: NodescaleIdentityChallengeV2,
     ) -> NodescaleIdentityChallengeResult {
         let request = match parse_challenge_request(context, operation) {
             Ok(request) => request,
@@ -360,7 +367,7 @@ impl<C: NodescaleIdentityControlPlane> TryNodescaleKeryxAdapter<C> {
     async fn handle_bind(
         &self,
         context: &AuthenticatedDirectContext,
-        operation: NodescaleIdentityBindV1,
+        operation: NodescaleIdentityBindV2,
     ) -> NodescaleIdentityBindResult {
         let request = match parse_bind_request(context, operation) {
             Ok(request) => request,
@@ -384,10 +391,30 @@ impl<C: NodescaleIdentityControlPlane> TryNodescaleKeryxAdapter<C> {
 
     #[cfg(test)]
     #[doc(hidden)]
-    pub async fn handle_challenge_for_test(
+    pub async fn handle_challenge_v1_for_test(
+        &self,
+        _context: RawAuthenticatedDirectContext,
+        _operation: NodescaleIdentityChallengeV1,
+    ) -> NodescaleIdentityChallengeResult {
+        rejected_challenge(PROTOCOL_VERSION_ERROR_CODE, PROTOCOL_VERSION_ERROR_REASON)
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub async fn handle_bind_v1_for_test(
+        &self,
+        _context: RawAuthenticatedDirectContext,
+        _operation: NodescaleIdentityBindV1,
+    ) -> NodescaleIdentityBindResult {
+        rejected_bind(PROTOCOL_VERSION_ERROR_CODE, PROTOCOL_VERSION_ERROR_REASON)
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub async fn handle_challenge_v2_for_test(
         &self,
         context: RawAuthenticatedDirectContext,
-        operation: NodescaleIdentityChallengeV1,
+        operation: NodescaleIdentityChallengeV2,
     ) -> NodescaleIdentityChallengeResult {
         let request = match parse_challenge_request_fields(
             &context.source,
@@ -409,10 +436,10 @@ impl<C: NodescaleIdentityControlPlane> TryNodescaleKeryxAdapter<C> {
 
     #[cfg(test)]
     #[doc(hidden)]
-    pub async fn handle_bind_for_test(
+    pub async fn handle_bind_v2_for_test(
         &self,
         context: RawAuthenticatedDirectContext,
-        operation: NodescaleIdentityBindV1,
+        operation: NodescaleIdentityBindV2,
     ) -> NodescaleIdentityBindResult {
         let request = match parse_bind_request_fields(
             &context.source,
@@ -449,7 +476,11 @@ impl<C: NodescaleIdentityControlPlane> NodescaleIdentityChallengeHandler
         context: AuthenticatedDirectContext,
         operation: NodescaleIdentityChallengeV1,
     ) -> anyhow::Result<NodescaleIdentityChallengeResult> {
-        Ok(self.handle_challenge(&context, operation).await)
+        let _ = (context, operation);
+        Ok(rejected_challenge(
+            PROTOCOL_VERSION_ERROR_CODE,
+            PROTOCOL_VERSION_ERROR_REASON,
+        ))
     }
 }
 
@@ -462,13 +493,43 @@ impl<C: NodescaleIdentityControlPlane> NodescaleIdentityBindHandler
         context: AuthenticatedDirectContext,
         operation: NodescaleIdentityBindV1,
     ) -> anyhow::Result<NodescaleIdentityBindResult> {
+        let _ = (context, operation);
+        Ok(rejected_bind(
+            PROTOCOL_VERSION_ERROR_CODE,
+            PROTOCOL_VERSION_ERROR_REASON,
+        ))
+    }
+}
+
+#[tonic::async_trait]
+impl<C: NodescaleIdentityControlPlane> NodescaleIdentityChallengeV2Handler
+    for TryNodescaleKeryxAdapter<C>
+{
+    async fn handle_nodescale_identity_challenge_v2(
+        &self,
+        context: AuthenticatedDirectContext,
+        operation: NodescaleIdentityChallengeV2,
+    ) -> anyhow::Result<NodescaleIdentityChallengeResult> {
+        Ok(self.handle_challenge(&context, operation).await)
+    }
+}
+
+#[tonic::async_trait]
+impl<C: NodescaleIdentityControlPlane> NodescaleIdentityBindV2Handler
+    for TryNodescaleKeryxAdapter<C>
+{
+    async fn handle_nodescale_identity_bind_v2(
+        &self,
+        context: AuthenticatedDirectContext,
+        operation: NodescaleIdentityBindV2,
+    ) -> anyhow::Result<NodescaleIdentityBindResult> {
         Ok(self.handle_bind(&context, operation).await)
     }
 }
 
 fn parse_challenge_request(
     context: &AuthenticatedDirectContext,
-    operation: NodescaleIdentityChallengeV1,
+    operation: NodescaleIdentityChallengeV2,
 ) -> Result<ChallengeRequest, InputError> {
     parse_challenge_request_fields(
         context.authenticated_source_node_id(),
@@ -482,14 +543,14 @@ fn parse_challenge_request_fields(
     source: &str,
     destination: &str,
     frame: &str,
-    operation: NodescaleIdentityChallengeV1,
+    operation: NodescaleIdentityChallengeV2,
 ) -> Result<ChallengeRequest, InputError> {
     Ok(ChallengeRequest {
         provenance: AuthenticatedProvenance::parse(source, destination, frame)?,
         operation_id: OperationId::parse(operation.operation_id).map_err(|_| InputError)?,
         network_id: NetworkId::parse(&operation.network_id).map_err(|_| InputError)?,
         device_id: DeviceId::parse(&operation.device_id).map_err(|_| InputError)?,
-        join_session_id: JoinSessionId::parse(&operation.join_session_id)
+        provider_binding_id: ProviderBindingId::parse(&operation.provider_binding_id)
             .map_err(|_| InputError)?,
         agent_version: AgentVersion::parse(operation.agent_version).map_err(|_| InputError)?,
     })
@@ -497,7 +558,7 @@ fn parse_challenge_request_fields(
 
 fn parse_bind_request(
     context: &AuthenticatedDirectContext,
-    operation: NodescaleIdentityBindV1,
+    operation: NodescaleIdentityBindV2,
 ) -> Result<AuthenticatedBindRequest, InputError> {
     parse_bind_request_fields(
         context.authenticated_source_node_id(),
@@ -511,14 +572,14 @@ fn parse_bind_request_fields(
     source: &str,
     destination: &str,
     frame: &str,
-    operation: NodescaleIdentityBindV1,
+    operation: NodescaleIdentityBindV2,
 ) -> Result<AuthenticatedBindRequest, InputError> {
     let provenance = AuthenticatedProvenance::parse(source, destination, frame)?;
     let request = N6AuthenticatedBindRequest::new(
         OperationId::parse(operation.operation_id).map_err(|_| InputError)?,
         NetworkId::parse(&operation.network_id).map_err(|_| InputError)?,
         DeviceId::parse(&operation.device_id).map_err(|_| InputError)?,
-        JoinSessionId::parse(&operation.join_session_id).map_err(|_| InputError)?,
+        ProviderBindingId::parse(&operation.provider_binding_id).map_err(|_| InputError)?,
         BindingNonce::from_str(&operation.binding_nonce).map_err(|_| InputError)?,
         Generation::new(operation.binding_generation).map_err(|_| InputError)?,
         AgentVersion::parse(operation.agent_version).map_err(|_| InputError)?,

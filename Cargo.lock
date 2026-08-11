@@ -1588,7 +1588,7 @@ dependencies = [
 [[package]]
 name = "keryx-core"
 version = "0.1.0"
-source = "git+https://github.com/Dadmin88/hermes-keryx?rev=8fe1769612d701e7509644ac7c9ebb3b8c24fcb1#8fe1769612d701e7509644ac7c9ebb3b8c24fcb1"
+source = "git+https://github.com/Dadmin88/hermes-keryx?rev=54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee#54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee"
 dependencies = [
  "serde",
  "sha2",
@@ -1598,7 +1598,7 @@ dependencies = [
 [[package]]
 name = "keryx-observe"
 version = "0.1.0"
-source = "git+https://github.com/Dadmin88/hermes-keryx?rev=8fe1769612d701e7509644ac7c9ebb3b8c24fcb1#8fe1769612d701e7509644ac7c9ebb3b8c24fcb1"
+source = "git+https://github.com/Dadmin88/hermes-keryx?rev=54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee#54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee"
 dependencies = [
  "keryx-core",
 ]
@@ -1606,7 +1606,7 @@ dependencies = [
 [[package]]
 name = "keryx-proto"
 version = "0.1.0"
-source = "git+https://github.com/Dadmin88/hermes-keryx?rev=8fe1769612d701e7509644ac7c9ebb3b8c24fcb1#8fe1769612d701e7509644ac7c9ebb3b8c24fcb1"
+source = "git+https://github.com/Dadmin88/hermes-keryx?rev=54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee#54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee"
 dependencies = [
  "keryx-core",
  "prost",
@@ -1619,7 +1619,7 @@ dependencies = [
 [[package]]
 name = "keryx-relay"
 version = "0.1.0"
-source = "git+https://github.com/Dadmin88/hermes-keryx?rev=8fe1769612d701e7509644ac7c9ebb3b8c24fcb1#8fe1769612d701e7509644ac7c9ebb3b8c24fcb1"
+source = "git+https://github.com/Dadmin88/hermes-keryx?rev=54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee#54ce01832fb2f6d7b2712dd6cdbc9a474a4a59ee"
 dependencies = [
  "anyhow",
  "base64",
