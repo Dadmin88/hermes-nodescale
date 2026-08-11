@@ -17,6 +17,7 @@ fn valid_config() -> RuntimeConfig {
             auth: TailscaleAuthMode::ApiAccessToken,
         },
         observation_api: None,
+        operator_api: None,
     }
 }
 

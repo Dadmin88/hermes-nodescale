@@ -228,6 +228,31 @@ impl StateStore {
         self.transactional(|tx, store| store.n6_binding_view_tx(tx, binding_id))
     }
 
+    /// Latest durable binding lifecycle row for one exact device.
+    pub fn latest_n6_binding(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<Option<N6BindingView>, StateError> {
+        self.transactional(|tx, store| {
+            let binding_id = tx
+                .query_row(
+                    "SELECT binding_id FROM n6_binding_records \
+                     WHERE device_id=?1 \
+                     ORDER BY generation DESC, revision DESC, binding_id DESC LIMIT 1",
+                    [device_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            binding_id
+                .map(|binding_id| {
+                    KeryxBindingId::parse(&binding_id)
+                        .map_err(|error| StateError::Conflict(error.to_string()))
+                        .and_then(|binding_id| store.n6_binding_view_tx(tx, binding_id))
+                })
+                .transpose()
+        })
+    }
+
     /// Reads the sole production bridge from N6 durable state into N7 domain
     /// provenance. It succeeds only for this exact active binding tuple; a
     /// pending, stale, rotated, revoked, peerless, or mismatched row is not

@@ -898,6 +898,18 @@ impl StateStore {
         load_device_trust_view(&self.connection.borrow(), device_id)
     }
 
+    /// Durable trust lifecycle only; this does not perform provider reconciliation.
+    pub fn durable_device_trust(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<Option<DeviceTrustView>, StateError> {
+        match self.persisted_device_trust_view(device_id) {
+            Ok(view) => Ok(Some(view)),
+            Err(StateError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn device_id_by_provider_registration(
         &self,
         provider_instance_id: ProviderInstanceId,
