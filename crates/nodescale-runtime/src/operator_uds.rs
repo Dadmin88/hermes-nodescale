@@ -104,20 +104,10 @@ impl OperatorUdsListener {
         recover_stale_socket(&config.socket_path)?;
         let listener = UnixListener::bind(&config.socket_path)
             .map_err(|_| RuntimeError::Configuration("operator_api socket could not be bound"))?;
-        let metadata = match fs::symlink_metadata(&config.socket_path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                let _ = fs::remove_file(&config.socket_path);
-                return Err(RuntimeError::Configuration(
-                    "operator_api socket metadata is unavailable",
-                ));
-            }
-        };
-        let socket_path = OwnedSocketPath {
-            path: config.socket_path.clone(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        };
+        listener.set_nonblocking(true).map_err(|_| {
+            RuntimeError::Configuration("operator_api socket could not become nonblocking")
+        })?;
+        let socket_path = capture_owned_socket_path(&listener, &config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)).map_err(
             |_| RuntimeError::Configuration("operator_api socket permissions could not be set"),
         )?;
@@ -132,9 +122,6 @@ impl OperatorUdsListener {
         {
             return Err(RuntimeError::Configuration("operator_api socket is unsafe"));
         }
-        listener.set_nonblocking(true).map_err(|_| {
-            RuntimeError::Configuration("operator_api socket could not become nonblocking")
-        })?;
         Ok(Self {
             listener,
             _socket_path: socket_path,
@@ -159,6 +146,52 @@ impl OperatorUdsListener {
             Err(_) => Err(RuntimeError::Configuration("operator_api accept failed")),
         }
     }
+}
+
+fn capture_owned_socket_path(
+    listener: &UnixListener,
+    path: &Path,
+) -> Result<OwnedSocketPath, RuntimeError> {
+    let before = fs::symlink_metadata(path)
+        .map_err(|_| RuntimeError::Configuration("operator_api socket metadata is unavailable"))?;
+    if !before.file_type().is_socket() || before.uid() != geteuid().as_raw() {
+        return Err(RuntimeError::Configuration("operator_api socket is unsafe"));
+    }
+    let probe = UnixStream::connect(path).map_err(|_| {
+        RuntimeError::Configuration("operator_api socket ownership could not be verified")
+    })?;
+    let (accepted, _) = listener.accept().map_err(|_| {
+        RuntimeError::Configuration("operator_api socket ownership could not be verified")
+    })?;
+    let credentials = getsockopt(&accepted, PeerCredentials).map_err(|_| {
+        RuntimeError::Configuration("operator_api socket ownership could not be verified")
+    })?;
+    let expected_pid = i32::try_from(std::process::id()).map_err(|_| {
+        RuntimeError::Configuration("operator_api socket ownership could not be verified")
+    })?;
+    if credentials.uid() != geteuid().as_raw() || credentials.pid() != expected_pid {
+        return Err(RuntimeError::Configuration(
+            "operator_api socket ownership could not be verified",
+        ));
+    }
+    drop(accepted);
+    drop(probe);
+    let after = fs::symlink_metadata(path)
+        .map_err(|_| RuntimeError::Configuration("operator_api socket path changed"))?;
+    if !after.file_type().is_socket()
+        || after.dev() != before.dev()
+        || after.ino() != before.ino()
+        || after.uid() != before.uid()
+    {
+        return Err(RuntimeError::Configuration(
+            "operator_api socket path changed",
+        ));
+    }
+    Ok(OwnedSocketPath {
+        path: path.to_owned(),
+        device: after.dev(),
+        inode: after.ino(),
+    })
 }
 
 fn acquire_owner_lock(socket_path: &Path) -> Result<Flock<File>, RuntimeError> {
