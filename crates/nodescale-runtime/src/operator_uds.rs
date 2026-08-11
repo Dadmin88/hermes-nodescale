@@ -1,5 +1,6 @@
 use crate::RuntimeError;
 use nix::{
+    fcntl::{Flock, FlockArg},
     sys::socket::{getsockopt, sockopt::PeerCredentials},
     unistd::geteuid,
 };
@@ -7,13 +8,13 @@ use nodescale_domain::{Device, DeviceId, NetworkId, Roles};
 use nodescale_state::{DEVICE_PAGE_MAX, DeviceTrustView, N6BindingView, StateError, StateStore};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 const VERSION: &str = "nodescale.operator.v1";
@@ -73,31 +74,61 @@ impl OperatorApiConfig {
 
 pub struct OperatorUdsListener {
     listener: UnixListener,
+    _socket_path: OwnedSocketPath,
+    _owner_lock: Flock<File>,
+    peer_uid: u32,
+}
+
+struct OwnedSocketPath {
     path: PathBuf,
     device: u64,
     inode: u64,
-    peer_uid: u32,
+}
+
+impl Drop for OwnedSocketPath {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::symlink_metadata(&self.path)
+            && metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl OperatorUdsListener {
     pub fn bind(config: &OperatorApiConfig) -> Result<Self, RuntimeError> {
         config.validate()?;
-        if fs::symlink_metadata(&config.socket_path).is_ok() {
-            return Err(RuntimeError::Configuration(
-                "operator_api socket path already exists",
-            ));
-        }
+        let owner_lock = acquire_owner_lock(&config.socket_path)?;
+        recover_stale_socket(&config.socket_path)?;
         let listener = UnixListener::bind(&config.socket_path)
             .map_err(|_| RuntimeError::Configuration("operator_api socket could not be bound"))?;
+        let metadata = match fs::symlink_metadata(&config.socket_path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                let _ = fs::remove_file(&config.socket_path);
+                return Err(RuntimeError::Configuration(
+                    "operator_api socket metadata is unavailable",
+                ));
+            }
+        };
+        let socket_path = OwnedSocketPath {
+            path: config.socket_path.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)).map_err(
             |_| RuntimeError::Configuration("operator_api socket permissions could not be set"),
         )?;
-        let metadata = fs::symlink_metadata(&config.socket_path).map_err(|_| {
+        let configured_metadata = fs::symlink_metadata(&config.socket_path).map_err(|_| {
             RuntimeError::Configuration("operator_api socket metadata is unavailable")
         })?;
-        if !metadata.file_type().is_socket()
-            || metadata.uid() != geteuid().as_raw()
-            || metadata.mode() & 0o777 != 0o600
+        if !configured_metadata.file_type().is_socket()
+            || configured_metadata.dev() != socket_path.device
+            || configured_metadata.ino() != socket_path.inode
+            || configured_metadata.uid() != geteuid().as_raw()
+            || configured_metadata.mode() & 0o777 != 0o600
         {
             return Err(RuntimeError::Configuration("operator_api socket is unsafe"));
         }
@@ -106,9 +137,8 @@ impl OperatorUdsListener {
         })?;
         Ok(Self {
             listener,
-            path: config.socket_path.clone(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            _socket_path: socket_path,
+            _owner_lock: owner_lock,
             peer_uid: config.peer_uid,
         })
     }
@@ -131,16 +161,105 @@ impl OperatorUdsListener {
     }
 }
 
-impl Drop for OperatorUdsListener {
-    fn drop(&mut self) {
-        if let Ok(metadata) = fs::symlink_metadata(&self.path)
-            && metadata.file_type().is_socket()
-            && metadata.dev() == self.device
-            && metadata.ino() == self.inode
-        {
-            let _ = fs::remove_file(&self.path);
+fn acquire_owner_lock(socket_path: &Path) -> Result<Flock<File>, RuntimeError> {
+    let lock_path = adjacent_lock_path(socket_path);
+    let mut created = false;
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&lock_path)
+    {
+        Ok(file) => {
+            created = true;
+            file
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&lock_path)
+            .map_err(|_| RuntimeError::Configuration("operator_api owner lock is unsafe"))?,
+        Err(_) => {
+            return Err(RuntimeError::Configuration(
+                "operator_api owner lock is unavailable",
+            ));
+        }
+    };
+    if created {
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).map_err(|_| {
+            RuntimeError::Configuration("operator_api owner lock permissions could not be set")
+        })?;
+    }
+    let metadata = file
+        .metadata()
+        .map_err(|_| RuntimeError::Configuration("operator_api owner lock is unsafe"))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(RuntimeError::Configuration(
+            "operator_api owner lock is unsafe",
+        ));
+    }
+    Flock::lock(file, FlockArg::LockExclusiveNonblock)
+        .map_err(|_| RuntimeError::Configuration("operator_api socket has an active owner"))
+}
+
+fn adjacent_lock_path(socket_path: &Path) -> PathBuf {
+    let mut name = socket_path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn recover_stale_socket(socket_path: &Path) -> Result<(), RuntimeError> {
+    let metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(RuntimeError::Configuration(
+                "operator_api socket path is unavailable",
+            ));
+        }
+    };
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(RuntimeError::Configuration(
+            "operator_api socket path is unsafe",
+        ));
+    }
+    match UnixStream::connect(socket_path) {
+        Ok(_) => {
+            return Err(RuntimeError::Configuration(
+                "operator_api socket has an active incumbent",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        Err(_) => {
+            return Err(RuntimeError::Configuration(
+                "operator_api socket liveness is unavailable",
+            ));
         }
     }
+    let current = fs::symlink_metadata(socket_path)
+        .map_err(|_| RuntimeError::Configuration("operator_api socket path changed"))?;
+    if !current.file_type().is_socket()
+        || current.dev() != metadata.dev()
+        || current.ino() != metadata.ino()
+        || current.uid() != metadata.uid()
+        || current.mode() & 0o777 != 0o600
+    {
+        return Err(RuntimeError::Configuration(
+            "operator_api socket path changed",
+        ));
+    }
+    fs::remove_file(socket_path)
+        .map_err(|_| RuntimeError::Configuration("operator_api stale socket could not be removed"))
 }
 
 fn serve_stream(mut stream: UnixStream, store: &StateStore) -> Result<(), ()> {

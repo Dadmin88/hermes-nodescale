@@ -24,7 +24,7 @@ Responses are explicitly projected durable current-state observations. They expo
 
 ## Optional same-UID operator-control socket
 
-The separate `[operator_api]` listener is disabled unless configured explicitly. It uses the same private-parent, exact `SO_PEERCRED` UID, mode `0600`, no-pre-existing-path, and owned-inode cleanup rules as the observation socket, but it has a separate path and protocol. Provider observation access never inherits operator authority.
+The separate `[operator_api]` listener is disabled unless configured explicitly. It uses the same private-parent, exact `SO_PEERCRED` UID, mode `0600`, and owned-inode cleanup rules as the observation socket, but it has a separate path and protocol. An adjacent mode-`0600` advisory owner lock survives a crash while its process ownership does not; startup removes only a stale same-owner mode-`0600` socket after obtaining that lock, refuses active or unsafe incumbents, and never removes a replacement inode it does not own. Provider observation access never inherits operator authority.
 
 The first contract slice is `nodescale.operator.v1` and is deliberately read-only. Its only request kinds are `capabilities`, bounded `devices.list`, and exact `devices.inspect`. `capabilities` advertises an empty mutation-operation set. Requests use one big-endian u32 length-prefixed JSON document followed by write-half close; unknown, duplicate, malformed, trailing, truncated, and oversized input is rejected with fixed error categories. Device pages are scoped to one exact network and use canonical device IDs as stable current-state cursors. Responses are capped at 64 KiB.
 

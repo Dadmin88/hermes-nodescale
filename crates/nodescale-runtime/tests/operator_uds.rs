@@ -13,7 +13,10 @@ use std::{
     fs,
     io::{Read, Write},
     net::Shutdown,
-    os::unix::{fs::PermissionsExt, net::UnixStream},
+    os::unix::{
+        fs::{PermissionsExt, symlink},
+        net::{UnixListener, UnixStream},
+    },
     path::Path,
 };
 use tempfile::tempdir;
@@ -246,4 +249,78 @@ fn operator_contract_rejects_oversized_frames_and_unsafe_peer_configuration() {
     .err()
     .expect("mismatched peer UID must be rejected");
     assert!(error.to_string().contains("peer_uid"));
+}
+
+#[test]
+fn operator_socket_recovers_a_safe_stale_inode_without_unlinking_an_active_replacement() {
+    let directory = tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let socket_path = directory.path().join("operator.sock");
+    let stale = UnixListener::bind(&socket_path).unwrap();
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(stale);
+
+    let listener = OperatorUdsListener::bind(&OperatorApiConfig {
+        socket_path: socket_path.clone(),
+        peer_uid: nix::unistd::geteuid().as_raw(),
+    })
+    .unwrap();
+    assert!(UnixStream::connect(&socket_path).is_ok());
+
+    let incumbent_error = OperatorUdsListener::bind(&OperatorApiConfig {
+        socket_path: socket_path.clone(),
+        peer_uid: nix::unistd::geteuid().as_raw(),
+    })
+    .err()
+    .expect("the owner-held lock must reject an active incumbent");
+    assert!(incumbent_error.to_string().contains("active"));
+
+    fs::remove_file(&socket_path).unwrap();
+    let replacement = UnixListener::bind(&socket_path).unwrap();
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    assert!(socket_path.exists());
+    drop(replacement);
+
+    let rebound = OperatorUdsListener::bind(&OperatorApiConfig {
+        socket_path: socket_path.clone(),
+        peer_uid: nix::unistd::geteuid().as_raw(),
+    })
+    .unwrap();
+    drop(rebound);
+    assert!(!socket_path.exists());
+}
+
+#[test]
+fn operator_socket_refuses_unsafe_stale_and_lock_artifacts() {
+    let directory = tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let socket_path = directory.path().join("operator.sock");
+    let stale = UnixListener::bind(&socket_path).unwrap();
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660)).unwrap();
+    drop(stale);
+
+    let error = OperatorUdsListener::bind(&OperatorApiConfig {
+        socket_path: socket_path.clone(),
+        peer_uid: nix::unistd::geteuid().as_raw(),
+    })
+    .err()
+    .expect("an unsafe stale socket must not be removed");
+    assert!(error.to_string().contains("unsafe"));
+    assert!(socket_path.exists());
+    fs::remove_file(&socket_path).unwrap();
+    fs::remove_file(directory.path().join("operator.sock.lock")).unwrap();
+
+    let target = directory.path().join("target");
+    fs::write(&target, b"preserve").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&target, directory.path().join("operator.sock.lock")).unwrap();
+    let error = OperatorUdsListener::bind(&OperatorApiConfig {
+        socket_path,
+        peer_uid: nix::unistd::geteuid().as_raw(),
+    })
+    .err()
+    .expect("a symlinked owner lock must be rejected");
+    assert!(error.to_string().contains("unsafe"));
+    assert_eq!(fs::read(&target).unwrap(), b"preserve");
 }
