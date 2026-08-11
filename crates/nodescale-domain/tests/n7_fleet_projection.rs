@@ -1,8 +1,8 @@
 use chrono::Utc;
 use nodescale_domain::n7::{FleetGeneratedGrants, N7FleetDesiredProjection};
 use nodescale_domain::{
-    AgentVersion, DeviceId, Generation, JoinSessionId, KeryxBindingId, KeryxBindingIdentity,
-    MembershipState, NetworkId, Operation, Role, Roles,
+    AgentVersion, DeviceId, Generation, KeryxBindingId, KeryxBindingIdentity, MembershipState,
+    NetworkId, Operation, ProviderBindingId, Role, Roles,
 };
 
 fn pending_binding(
@@ -14,7 +14,7 @@ fn pending_binding(
         KeryxBindingId::new(),
         network_id,
         device_id,
-        JoinSessionId::new(),
+        ProviderBindingId::new(),
         binding_generation,
         1,
         Utc::now(),

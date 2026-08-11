@@ -1921,6 +1921,58 @@ async fn start_server(
     .await
 }
 
+#[tokio::test]
+async fn fixture_root_probe_cannot_consume_provider_responses() {
+    let (endpoint, requests) = start_server(vec![
+        (200, include_str!("../fixtures/v0.29.3-version.json")),
+        (200, include_str!("../fixtures/v0.29.3-health.json")),
+    ])
+    .await;
+    let address = endpoint.trim_start_matches("http://");
+    let mut probe = tokio::net::TcpStream::connect(address).await.unwrap();
+    probe
+        .write_all(b"GET / HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut ignored = Vec::new();
+    probe.read_to_end(&mut ignored).await.unwrap();
+
+    let report = test_provider(&endpoint, HeadscaleClientOptions::default())
+        .verify_compatibility()
+        .await
+        .unwrap();
+    assert_eq!(report.status, CompatibilityStatus::Compatible);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("GET /version "));
+    assert!(requests[1].starts_with("GET /api/v1/health "));
+}
+
+#[tokio::test]
+async fn fixture_non_get_root_request_remains_ordered_and_captured() {
+    let (endpoint, requests) = start_server(vec![(200, r#"{"accepted":true}"#)]).await;
+    let address = endpoint.trim_start_matches("http://");
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    assert!(
+        String::from_utf8(response)
+            .unwrap()
+            .ends_with(r#"{"accepted":true}"#)
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].target, "/");
+}
+
 async fn start_server_cases(
     responses: Vec<TestResponse>,
 ) -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
@@ -1930,8 +1982,16 @@ async fn start_server_cases(
     let captured = Arc::clone(&requests);
     tokio::spawn(async move {
         for response in responses {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_complete_request(&mut socket).await.unwrap();
+            let (mut socket, request) = loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_complete_request(&mut socket).await.unwrap();
+                if request.method == "GET" && request.target == "/" {
+                    write_response(&mut socket, 404, r#"{"error":"fixture route not found"}"#)
+                        .await;
+                    continue;
+                }
+                break (socket, request);
+            };
             captured.lock().unwrap().push(request);
             match response.mode {
                 ResponseMode::ApplyThenClose => {}

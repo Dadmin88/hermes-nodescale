@@ -13,7 +13,7 @@ const PRE_V8_MIGRATIONS: [&str; 7] = [
 ];
 
 #[test]
-fn v7_database_upgrades_to_inert_v8_adoption_state_without_authority() {
+fn v7_database_upgrades_through_v9_with_inert_v8_adoption_state_without_authority() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("v8-adoption-state.db");
     let connection = Connection::open(&path).unwrap();
@@ -29,8 +29,8 @@ fn v7_database_upgrades_to_inert_v8_adoption_state_without_authority() {
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 8);
-    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 9);
+    assert_eq!(store.schema_version().unwrap(), 9);
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
@@ -533,7 +533,7 @@ fn v7_database_upgrades_to_inert_v8_adoption_state_without_authority() {
 }
 
 #[test]
-fn populated_v7_reopens_as_v8_without_legacy_state_drift() {
+fn populated_v7_reopens_as_v9_without_legacy_state_drift() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("populated-v7-to-v8.db");
     let connection = Connection::open(&path).unwrap();

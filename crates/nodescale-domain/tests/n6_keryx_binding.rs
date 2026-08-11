@@ -117,14 +117,14 @@ fn n6_commands_are_bounded_secret_safe_and_fenced() {
     let expiry = now + Duration::minutes(5);
     let network_id = NetworkId::new();
     let device_id = DeviceId::new();
-    let join_session_id = JoinSessionId::new();
+    let provider_binding_id = ProviderBindingId::new();
     let binding_id = KeryxBindingId::new();
     let generation = Generation::initial();
     let peer = KeryxPeerId::parse("peer-1").unwrap();
     let challenge = N6BindingChallengeRequest::new(
         network_id,
         device_id,
-        join_session_id,
+        provider_binding_id,
         peer,
         generation,
         expiry,
@@ -138,7 +138,7 @@ fn n6_commands_are_bounded_secret_safe_and_fenced() {
         N6BindingChallengeRequest::new(
             network_id,
             device_id,
-            join_session_id,
+            provider_binding_id,
             KeryxPeerId::parse("peer-1").unwrap(),
             generation,
             now,
@@ -170,7 +170,7 @@ fn n6_commands_are_bounded_secret_safe_and_fenced() {
         OperationId::parse("bind-1").unwrap(),
         network_id,
         device_id,
-        join_session_id,
+        provider_binding_id,
         nonce,
         generation,
         agent_version(),
@@ -267,7 +267,7 @@ fn pending_rotation_records_predecessor_without_activation_evidence() {
         binding_id,
         NetworkId::new(),
         DeviceId::new(),
-        JoinSessionId::new(),
+        ProviderBindingId::new(),
         Generation::new(2).unwrap(),
         1,
         now,
@@ -289,7 +289,7 @@ fn pending_rotation_records_predecessor_without_activation_evidence() {
             binding_id,
             NetworkId::new(),
             DeviceId::new(),
-            JoinSessionId::new(),
+            ProviderBindingId::new(),
             Generation::new(2).unwrap(),
             1,
             now,
@@ -354,7 +354,7 @@ fn n6_safe_accessors_and_state_persistence_spellings_are_complete() {
     let expires_at = now + Duration::minutes(5);
     let network_id = NetworkId::new();
     let device_id = DeviceId::new();
-    let session_id = JoinSessionId::new();
+    let provider_binding_id = ProviderBindingId::new();
     let binding_id = KeryxBindingId::new();
     let generation = Generation::initial();
     let peer = KeryxPeerId::parse("peer-1").unwrap();
@@ -362,7 +362,7 @@ fn n6_safe_accessors_and_state_persistence_spellings_are_complete() {
     let challenge = N6BindingChallengeRequest::new(
         network_id,
         device_id,
-        session_id,
+        provider_binding_id,
         peer.clone(),
         generation,
         expires_at,
@@ -372,7 +372,7 @@ fn n6_safe_accessors_and_state_persistence_spellings_are_complete() {
     .unwrap();
     assert_eq!(challenge.network_id(), network_id);
     assert_eq!(challenge.device_id(), device_id);
-    assert_eq!(challenge.join_session_id(), session_id);
+    assert_eq!(challenge.provider_binding_id(), provider_binding_id);
     assert_eq!(challenge.expected_authenticated_peer_id(), &peer);
     assert_eq!(challenge.generation(), generation);
     assert_eq!(challenge.expires_at(), expires_at);

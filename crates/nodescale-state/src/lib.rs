@@ -32,7 +32,7 @@ pub use n7::*;
 #[cfg(test)]
 mod n5_identity_trust_tests;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 8;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 9;
 pub const DEVICE_PAGE_MAX: usize = 32;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
@@ -46,6 +46,8 @@ const KERYX_IDENTITY_BINDING_MIGRATION: &str =
 const FLEET_PROJECTION_MIGRATION: &str = include_str!("../migrations/0007_fleet_projection.sql");
 const EXISTING_DEVICE_ADOPTION_STATE_MIGRATION: &str =
     include_str!("../migrations/0008_existing_device_adoption_state.sql");
+const TYPED_N5_PROVENANCE_MIGRATION: &str =
+    include_str!("../migrations/0009_typed_n5_provenance.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -778,6 +780,162 @@ pub struct StateStore {
     fail_before_n4_confirmation_audit: Cell<bool>,
 }
 
+fn migration_query_digest(
+    connection: &Connection,
+    query: &str,
+) -> Result<(u64, String), StateError> {
+    let mut statement = connection.prepare(query)?;
+    let column_count = statement.column_count();
+    let mut rows = statement.query([])?;
+    let mut row_count = 0_u64;
+    let mut hasher = Sha256::new();
+    while let Some(row) = rows.next()? {
+        row_count += 1;
+        for index in 0..column_count {
+            use rusqlite::types::ValueRef;
+            match row.get_ref(index)? {
+                ValueRef::Null => hasher.update([0]),
+                ValueRef::Integer(value) => {
+                    hasher.update([1]);
+                    hasher.update(value.to_be_bytes());
+                }
+                ValueRef::Real(value) => {
+                    hasher.update([2]);
+                    hasher.update(value.to_bits().to_be_bytes());
+                }
+                ValueRef::Text(value) => {
+                    hasher.update([3]);
+                    hasher.update((value.len() as u64).to_be_bytes());
+                    hasher.update(value);
+                }
+                ValueRef::Blob(value) => {
+                    hasher.update([4]);
+                    hasher.update((value.len() as u64).to_be_bytes());
+                    hasher.update(value);
+                }
+            }
+        }
+    }
+    Ok((row_count, format!("{:x}", hasher.finalize())))
+}
+
+fn stage_columns(connection: &Connection, stage: &str) -> Result<Vec<String>, StateError> {
+    let mut statement = connection.prepare(&format!("PRAGMA temp.table_info(\"{stage}\")"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::from)
+}
+
+fn verify_v9_migration_parity(connection: &Connection) -> Result<(), StateError> {
+    for table in [
+        "n5_device_identities",
+        "n5_provider_bindings",
+        "n6_binding_decisions",
+        "n6_binding_records",
+        "n6_binding_challenges",
+        "n6_binding_authorizations",
+        "n6_challenge_reservations",
+    ] {
+        let stage = format!("stage_{table}");
+        let columns = stage_columns(connection, &stage)?;
+        if columns.is_empty() {
+            return Err(StateError::Conflict(format!(
+                "V9 staging table {stage} is missing"
+            )));
+        }
+        let old_projection = columns
+            .iter()
+            .map(|column| format!("s.\"{column}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (joins, new_projection) = match table {
+            "n5_device_identities" => (
+                " JOIN n5_n4_identity_origins p ON p.origin_id=n.n4_origin_id AND p.device_id=n.device_id AND p.network_id=n.network_id",
+                columns
+                    .iter()
+                    .map(|column| {
+                        if column == "origin_join_session_id" {
+                            "p.join_session_id AS origin_join_session_id".into()
+                        } else {
+                            format!("n.\"{column}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            "n5_provider_bindings" => (
+                " JOIN n5_n4_provider_binding_provenance p ON p.binding_id=n.n4_provenance_binding_id AND p.device_id=n.device_id AND p.network_id=n.network_id",
+                columns
+                    .iter()
+                    .map(|column| match column.as_str() {
+                        "join_session_id" => "p.join_session_id AS join_session_id".into(),
+                        "credential_id" => "p.credential_id AS credential_id".into(),
+                        "provider_credential_reference" => {
+                            "p.provider_credential_reference AS provider_credential_reference"
+                                .into()
+                        }
+                        _ => format!("n.\"{column}\""),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            "n6_binding_records" => (
+                " JOIN n5_n4_provider_binding_provenance p ON p.binding_id=n.n5_provider_binding_id AND p.device_id=n.device_id AND p.network_id=n.network_id",
+                columns
+                    .iter()
+                    .map(|column| {
+                        if column == "join_session_id" {
+                            "p.join_session_id AS join_session_id".into()
+                        } else {
+                            format!("n.\"{column}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            _ => (
+                " JOIN n6_binding_records r ON r.binding_id=n.binding_id AND r.network_id=n.network_id AND r.device_id=n.device_id AND r.generation=n.generation JOIN n5_n4_provider_binding_provenance p ON p.binding_id=r.n5_provider_binding_id AND p.device_id=r.device_id AND p.network_id=r.network_id",
+                columns
+                    .iter()
+                    .map(|column| {
+                        if column == "join_session_id" {
+                            "p.join_session_id AS join_session_id".into()
+                        } else {
+                            format!("n.\"{column}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        };
+        let order = (1..=columns.len())
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let old_query = format!("SELECT {old_projection} FROM temp.\"{stage}\" s ORDER BY {order}");
+        let new_query =
+            format!("SELECT {new_projection} FROM \"{table}\" n{joins} ORDER BY {order}");
+        let old_digest = migration_query_digest(connection, &old_query)?;
+        let new_digest = migration_query_digest(connection, &new_query)?;
+        if old_digest != new_digest {
+            return Err(StateError::Conflict(format!(
+                "V9 semantic parity failed for {table}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+const DROP_V9_STAGING: &str = "
+DROP TABLE temp.stage_n6_challenge_reservations;
+DROP TABLE temp.stage_n6_binding_authorizations;
+DROP TABLE temp.stage_n6_binding_challenges;
+DROP TABLE temp.stage_n6_binding_records;
+DROP TABLE temp.stage_n6_binding_decisions;
+DROP TABLE temp.stage_n5_provider_bindings;
+DROP TABLE temp.stage_n5_device_identities;
+";
+
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateError> {
         let connection = Connection::open(path)?;
@@ -791,156 +949,76 @@ impl StateStore {
     fn initialize(connection: Connection) -> Result<Self, StateError> {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        let found =
-            connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
-        if found > SUPPORTED_SCHEMA_VERSION {
-            return Err(StateError::UnsupportedSchema {
-                found,
-                supported: SUPPORTED_SCHEMA_VERSION,
-            });
-        }
-        if found == 0 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(INITIAL_MIGRATION)
-                .and_then(|()| connection.pragma_update(None, "user_version", 1_u32))
-                .and_then(|()| connection.execute_batch(DISCOVERY_MIGRATION))
-                .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
-                .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
-                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
-                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
-                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+
+        let migration_result = (|| -> Result<(), StateError> {
+            let found =
+                connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
+            if found > SUPPORTED_SCHEMA_VERSION {
+                return Err(StateError::UnsupportedSchema {
+                    found,
+                    supported: SUPPORTED_SCHEMA_VERSION,
                 });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
             }
-        } else if found == 1 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(DISCOVERY_MIGRATION)
-                .and_then(|()| connection.execute_batch(MUTATION_AUTHORIZATION_MIGRATION))
-                .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
-                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
-                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
-                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
+
+            let migrations = [
+                INITIAL_MIGRATION,
+                DISCOVERY_MIGRATION,
+                MUTATION_AUTHORIZATION_MIGRATION,
+                INVITATION_LIFECYCLE_MIGRATION,
+                DEVICE_TRUST_MIGRATION,
+                KERYX_IDENTITY_BINDING_MIGRATION,
+                FLEET_PROJECTION_MIGRATION,
+                EXISTING_DEVICE_ADOPTION_STATE_MIGRATION,
+                TYPED_N5_PROVENANCE_MIGRATION,
+            ];
+            for migration in migrations.iter().skip(found as usize) {
+                connection.execute_batch(migration)?;
             }
-        } else if found == 2 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(MUTATION_AUTHORIZATION_MIGRATION)
-                .and_then(|()| connection.execute_batch(INVITATION_LIFECYCLE_MIGRATION))
-                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
-                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
-                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
+            if found < SUPPORTED_SCHEMA_VERSION {
+                verify_v9_migration_parity(&connection)?;
+                connection.execute_batch(DROP_V9_STAGING)?;
             }
-        } else if found == 3 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(INVITATION_LIFECYCLE_MIGRATION)
-                .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
-                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
-                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
+
+            let foreign_key_failures: u64 = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if foreign_key_failures != 0 {
+                return Err(StateError::Conflict(format!(
+                    "migration left {foreign_key_failures} foreign-key violation(s)"
+                )));
             }
-        } else if found == 4 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(DEVICE_TRUST_MIGRATION)
-                .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
-                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
+            let integrity: String =
+                connection.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(StateError::Conflict(format!(
+                    "migration integrity check failed: {integrity}"
+                )));
             }
-        } else if found == 5 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(KERYX_IDENTITY_BINDING_MIGRATION)
-                .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
+            let staging_residue: u64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name LIKE 'stage_n5_%' OR name LIKE 'stage_n6_%'",
+                [],
+                |row| row.get(0),
+            )?;
+            if staging_residue != 0 {
+                return Err(StateError::Conflict(format!(
+                    "migration left {staging_residue} temporary staging object(s)"
+                )));
             }
-        } else if found == 6 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(FLEET_PROJECTION_MIGRATION)
-                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
-            }
-        } else if found == 7 {
-            connection.execute_batch("BEGIN IMMEDIATE;")?;
-            let migration_result = connection
-                .execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION)
-                .and_then(|()| {
-                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
-                });
-            match migration_result {
-                Ok(()) => connection.execute_batch("COMMIT;")?,
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK;");
-                    return Err(StateError::Sqlite(error));
-                }
+            connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
+            Ok(())
+        })();
+
+        match migration_result {
+            Ok(()) => connection.execute_batch("COMMIT;")?,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK;");
+                return Err(error);
             }
         }
+
         Ok(Self {
             connection: RefCell::new(connection),
             fail_before_audit: Cell::new(false),

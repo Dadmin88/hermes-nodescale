@@ -8,8 +8,9 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use keryx_proto::v1::{
-    NodescaleIdentityBindDisposition, NodescaleIdentityBindV1,
+    NodescaleIdentityBindDisposition, NodescaleIdentityBindV1, NodescaleIdentityBindV2,
     NodescaleIdentityChallengeDisposition, NodescaleIdentityChallengeV1,
+    NodescaleIdentityChallengeV2,
 };
 use nodescale_domain::{
     BindingNonce, Generation, KeryxBindingChallengeId, KeryxBindingId, N6BindingChallengeDelivery,
@@ -17,7 +18,7 @@ use nodescale_domain::{
 
 const NETWORK_ID: &str = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID: &str = "22222222-2222-4222-8222-222222222222";
-const SESSION_ID: &str = "33333333-3333-4333-8333-333333333333";
+const PROVIDER_BINDING_ID: &str = "33333333-3333-4333-8333-333333333333";
 
 #[derive(Clone)]
 enum ChallengeReply {
@@ -114,22 +115,22 @@ fn context() -> RawAuthenticatedDirectContext {
     RawAuthenticatedDirectContext::new("authenticated-peer", "destination-node", "frame-1")
 }
 
-fn challenge() -> NodescaleIdentityChallengeV1 {
-    NodescaleIdentityChallengeV1 {
+fn challenge() -> NodescaleIdentityChallengeV2 {
+    NodescaleIdentityChallengeV2 {
         operation_id: "challenge-1".into(),
         network_id: NETWORK_ID.into(),
         device_id: DEVICE_ID.into(),
-        join_session_id: SESSION_ID.into(),
+        provider_binding_id: PROVIDER_BINDING_ID.into(),
         agent_version: "nodescale-agent:6.0.0".into(),
     }
 }
 
-fn bind() -> NodescaleIdentityBindV1 {
-    NodescaleIdentityBindV1 {
+fn bind() -> NodescaleIdentityBindV2 {
+    NodescaleIdentityBindV2 {
         operation_id: "bind-1".into(),
         network_id: NETWORK_ID.into(),
         device_id: DEVICE_ID.into(),
-        join_session_id: SESSION_ID.into(),
+        provider_binding_id: PROVIDER_BINDING_ID.into(),
         binding_nonce: BindingNonce::generate().with_encoded(str::to_owned),
         binding_generation: 1,
         agent_version: "nodescale-agent:6.0.0".into(),
@@ -145,7 +146,7 @@ async fn issued_challenge_uses_authenticated_source_and_only_issued_returns_a_se
     let adapter = TryNodescaleKeryxAdapter::new(control_plane.clone()).unwrap();
 
     let result = adapter
-        .handle_challenge_for_test(context(), challenge())
+        .handle_challenge_v2_for_test(context(), challenge())
         .await;
 
     assert_eq!(
@@ -174,7 +175,7 @@ async fn duplicate_or_rejected_challenge_never_returns_a_secret() {
         .unwrap();
 
         let result = adapter
-            .handle_challenge_for_test(context(), challenge())
+            .handle_challenge_v2_for_test(context(), challenge())
             .await;
 
         assert_eq!(
@@ -213,7 +214,7 @@ async fn bind_maps_active_already_confirmed_and_rejected_exactly() {
         let control_plane = Arc::new(MockControlPlane::new(ChallengeReply::Issued, reply));
         let adapter = TryNodescaleKeryxAdapter::new(control_plane.clone()).unwrap();
 
-        let result = adapter.handle_bind_for_test(context(), bind()).await;
+        let result = adapter.handle_bind_v2_for_test(context(), bind()).await;
 
         assert_eq!(result.disposition, expected_disposition as i32);
         assert_eq!(result.accepted, expected_accepted);
@@ -234,7 +235,7 @@ async fn absent_authenticated_source_is_rejected_before_the_control_plane() {
     let adapter = TryNodescaleKeryxAdapter::new(control_plane.clone()).unwrap();
 
     let result = adapter
-        .handle_challenge_for_test(
+        .handle_challenge_v2_for_test(
             RawAuthenticatedDirectContext::new("", "destination-node", "frame-1"),
             challenge(),
         )
@@ -257,6 +258,55 @@ async fn absent_authenticated_source_is_rejected_before_the_control_plane() {
 }
 
 #[tokio::test]
+async fn legacy_v1_is_rejected_with_typed_version_error_without_control_plane_use() {
+    let control_plane = Arc::new(MockControlPlane::new(
+        ChallengeReply::Issued,
+        BindReply::Active,
+    ));
+    let adapter = TryNodescaleKeryxAdapter::new(control_plane.clone()).unwrap();
+    let challenge_result = adapter
+        .handle_challenge_v1_for_test(
+            context(),
+            NodescaleIdentityChallengeV1 {
+                operation_id: "legacy-challenge".into(),
+                network_id: NETWORK_ID.into(),
+                device_id: DEVICE_ID.into(),
+                join_session_id: "44444444-4444-4444-8444-444444444444".into(),
+                agent_version: "nodescale-agent:6.0.0".into(),
+            },
+        )
+        .await;
+    assert_eq!(challenge_result.code, "protocol_version_incompatible");
+    assert_eq!(
+        challenge_result.reason,
+        "typed provenance requires Nodescale control protocol V2"
+    );
+    let bind_result = adapter
+        .handle_bind_v1_for_test(
+            context(),
+            NodescaleIdentityBindV1 {
+                operation_id: "legacy-bind".into(),
+                network_id: NETWORK_ID.into(),
+                device_id: DEVICE_ID.into(),
+                join_session_id: "44444444-4444-4444-8444-444444444444".into(),
+                binding_nonce: BindingNonce::generate().with_encoded(str::to_owned),
+                binding_generation: 1,
+                agent_version: "nodescale-agent:6.0.0".into(),
+            },
+        )
+        .await;
+    assert_eq!(bind_result.code, "protocol_version_incompatible");
+    assert!(
+        control_plane
+            .seen_challenge_sources
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(control_plane.seen_bind_sources.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn failures_are_redacted_and_secret_free() {
     let adapter = TryNodescaleKeryxAdapter::new(Arc::new(MockControlPlane::new(
         ChallengeReply::Error,
@@ -265,7 +315,7 @@ async fn failures_are_redacted_and_secret_free() {
     .unwrap();
 
     let challenge_result = adapter
-        .handle_challenge_for_test(context(), challenge())
+        .handle_challenge_v2_for_test(context(), challenge())
         .await;
     assert_eq!(
         challenge_result.disposition,
@@ -276,7 +326,7 @@ async fn failures_are_redacted_and_secret_free() {
     assert_eq!(challenge_result.challenge_secret, "");
     assert!(!format!("{challenge_result:?}").contains("synthetic"));
 
-    let bind_result = adapter.handle_bind_for_test(context(), bind()).await;
+    let bind_result = adapter.handle_bind_v2_for_test(context(), bind()).await;
     assert_eq!(
         bind_result.disposition,
         NodescaleIdentityBindDisposition::Rejected as i32
@@ -320,4 +370,6 @@ fn handlers_are_only_available_after_successful_construction() {
     let handlers = adapter.direct_control_handlers();
     assert!(handlers.has_nodescale_identity_challenge_handler());
     assert!(handlers.has_nodescale_identity_bind_handler());
+    assert!(handlers.nodescale_identity_challenge_v2.is_some());
+    assert!(handlers.nodescale_identity_bind_v2.is_some());
 }

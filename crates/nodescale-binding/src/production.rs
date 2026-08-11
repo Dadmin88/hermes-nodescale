@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use nodescale_domain::{
-    AgentVersion, AuditActor, BindingNonce, BindingNonceVerifier, DeviceId, JoinSessionId,
+    AgentVersion, AuditActor, BindingNonce, BindingNonceVerifier, DeviceId,
     KeryxBindingAuthorization, KeryxBindingAuthorizationCapability, KeryxBindingId, KeryxPeerId,
     N6AuthenticatedBindRequest, N6BindingChallengeDelivery, N6BindingChallengeRequest,
     N6BindingRevocationIntent, N6BindingRotationIntent, NetworkId, OperationId,
-    OwnerTrustRootToken, TrustAuthorityId,
+    OwnerTrustRootToken, ProviderBindingId, TrustAuthorityId,
 };
 use nodescale_keryx_adapter::{
     AuthenticatedBindRequest, BindOutcome, ChallengeOutcome, ChallengeRequest, ControlPlaneError,
@@ -64,7 +64,7 @@ enum ActorCommand {
         operation_id: OperationId,
         network_id: NetworkId,
         device_id: DeviceId,
-        join_session_id: JoinSessionId,
+        provider_binding_id: ProviderBindingId,
         agent_version: AgentVersion,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
@@ -177,7 +177,7 @@ impl<C: N6Clock> N6BindingService<C> {
                                 operation_id,
                                 network_id,
                                 device_id,
-                                join_session_id,
+                                provider_binding_id,
                                 agent_version,
                                 now,
                                 expires_at,
@@ -189,7 +189,7 @@ impl<C: N6Clock> N6BindingService<C> {
                                     operation_id,
                                     network_id,
                                     device_id,
-                                    join_session_id,
+                                    provider_binding_id,
                                     agent_version,
                                     now,
                                     expires_at,
@@ -297,7 +297,7 @@ impl<C: N6Clock> N6BindingService<C> {
         operation_id: OperationId,
         network_id: NetworkId,
         device_id: DeviceId,
-        join_session_id: JoinSessionId,
+        provider_binding_id: ProviderBindingId,
         agent_version: AgentVersion,
     ) -> Result<N6ChallengeIssueOutcome, N6ProductionError> {
         let now = self.clock.now();
@@ -311,7 +311,7 @@ impl<C: N6Clock> N6BindingService<C> {
                 operation_id,
                 network_id,
                 device_id,
-                join_session_id,
+                provider_binding_id,
                 agent_version,
                 now,
                 expires_at: now + self.challenge_ttl,
@@ -462,7 +462,7 @@ async fn issue_on_actor(
     operation_id: OperationId,
     network_id: NetworkId,
     device_id: DeviceId,
-    join_session_id: JoinSessionId,
+    provider_binding_id: ProviderBindingId,
     agent_version: AgentVersion,
     now: DateTime<Utc>,
     expires_at: DateTime<Utc>,
@@ -482,7 +482,7 @@ async fn issue_on_actor(
     let request = N6BindingChallengeRequest::new(
         network_id,
         device_id,
-        join_session_id,
+        provider_binding_id,
         authenticated_peer,
         generation,
         expires_at,
@@ -623,7 +623,7 @@ impl<C: N6Clock> NodescaleIdentityControlPlane for N6BindingService<C> {
                 request.operation_id().clone(),
                 request.network_id(),
                 request.device_id(),
-                request.join_session_id(),
+                request.provider_binding_id(),
                 request.agent_version().clone(),
             )
             .await

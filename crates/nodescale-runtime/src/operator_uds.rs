@@ -696,7 +696,7 @@ mod tests {
     use chrono::Utc;
     use nodescale_domain::{
         DeviceId, DeviceTrustState, Generation, JoinSessionId, KeryxBindingId, KeryxBindingState,
-        KeryxPeerId, NetworkId,
+        KeryxPeerId, NetworkId, ProviderBindingId,
     };
 
     #[test]
@@ -719,6 +719,7 @@ mod tests {
             binding_id: KeryxBindingId::new(),
             network_id: trust.network_id,
             device_id: trust.device_id,
+            provider_binding_id: ProviderBindingId::new(),
             join_session_id: JoinSessionId::new(),
             verified_peer_id: Some(KeryxPeerId::parse("peer-a").unwrap()),
             generation: Generation::new(9).unwrap(),

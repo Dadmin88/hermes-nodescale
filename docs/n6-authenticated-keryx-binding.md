@@ -69,7 +69,7 @@ control handler for rotation or revocation.
 ## Binding lifecycle
 
 A binding is associated with exactly one `(network_id, device_id,
-join_session_id, generation)` and has these legal transitions:
+provider_binding_id, generation)`. The authoritative N6 record stores that exact N5 provider binding; subordinate N6 rows derive provenance through `(binding_id, network_id, device_id, generation)`. For byte-compatible replay fingerprints and historical views, state resolves the N4 `join_session_id` through the typed N5 subtype rather than persisting it in N6. A binding has these legal transitions:
 
 ```text
 pending -> active | revoked

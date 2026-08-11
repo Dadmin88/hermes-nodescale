@@ -691,7 +691,7 @@ struct KeryxBindingIdentityRecord {
     binding_id: KeryxBindingId,
     network_id: NetworkId,
     device_id: DeviceId,
-    join_session_id: JoinSessionId,
+    provider_binding_id: ProviderBindingId,
     verified_peer_id: Option<KeryxPeerId>,
     generation: Generation,
     revision: u64,
@@ -717,7 +717,7 @@ impl KeryxBindingIdentity {
         binding_id: KeryxBindingId,
         network_id: NetworkId,
         device_id: DeviceId,
-        join_session_id: JoinSessionId,
+        provider_binding_id: ProviderBindingId,
         generation: Generation,
         revision: u64,
         created_at: DateTime<Utc>,
@@ -727,7 +727,7 @@ impl KeryxBindingIdentity {
             binding_id,
             network_id,
             device_id,
-            join_session_id,
+            provider_binding_id,
             verified_peer_id: None,
             generation,
             revision,
@@ -748,7 +748,7 @@ impl KeryxBindingIdentity {
         binding_id: KeryxBindingId,
         network_id: NetworkId,
         device_id: DeviceId,
-        join_session_id: JoinSessionId,
+        provider_binding_id: ProviderBindingId,
         generation: Generation,
         revision: u64,
         created_at: DateTime<Utc>,
@@ -759,7 +759,7 @@ impl KeryxBindingIdentity {
             binding_id,
             network_id,
             device_id,
-            join_session_id,
+            provider_binding_id,
             verified_peer_id: None,
             generation,
             revision,
@@ -793,8 +793,8 @@ impl KeryxBindingIdentity {
         self.0.device_id
     }
     #[must_use]
-    pub fn join_session_id(&self) -> JoinSessionId {
-        self.0.join_session_id
+    pub fn provider_binding_id(&self) -> ProviderBindingId {
+        self.0.provider_binding_id
     }
     #[must_use]
     pub fn verified_peer_id(&self) -> Option<&KeryxPeerId> {
@@ -852,7 +852,7 @@ fn validate_keryx_binding_identity_authority_values(
     KeryxBindingId::parse(&record.binding_id.to_string())?;
     NetworkId::parse(&record.network_id.to_string())?;
     DeviceId::parse(&record.device_id.to_string())?;
-    JoinSessionId::parse(&record.join_session_id.to_string())?;
+    ProviderBindingId::parse(&record.provider_binding_id.to_string())?;
     if let Some(rotated_from) = record.rotated_from {
         KeryxBindingId::parse(&rotated_from.to_string())?;
     }
@@ -1975,7 +1975,7 @@ fn revalidate_n6_reason_code(reason_code: &ReasonCode) -> Result<(), DomainError
 pub struct N6BindingChallengeRequest {
     network_id: NetworkId,
     device_id: DeviceId,
-    join_session_id: JoinSessionId,
+    provider_binding_id: ProviderBindingId,
     expected_authenticated_peer_id: KeryxPeerId,
     generation: Generation,
     expires_at: DateTime<Utc>,
@@ -1986,7 +1986,7 @@ impl N6BindingChallengeRequest {
     pub fn new(
         network_id: NetworkId,
         device_id: DeviceId,
-        join_session_id: JoinSessionId,
+        provider_binding_id: ProviderBindingId,
         expected_authenticated_peer_id: KeryxPeerId,
         generation: Generation,
         expires_at: DateTime<Utc>,
@@ -1995,7 +1995,7 @@ impl N6BindingChallengeRequest {
     ) -> Result<Self, DomainError> {
         revalidate_n6_uuid_id(&network_id, NetworkId::parse)?;
         revalidate_n6_uuid_id(&device_id, DeviceId::parse)?;
-        revalidate_n6_uuid_id(&join_session_id, JoinSessionId::parse)?;
+        revalidate_n6_uuid_id(&provider_binding_id, ProviderBindingId::parse)?;
         revalidate_n6_peer_id(&expected_authenticated_peer_id)?;
         revalidate_n6_generation(generation)?;
         revalidate_n6_agent_version(&agent_version)?;
@@ -2003,7 +2003,7 @@ impl N6BindingChallengeRequest {
         Ok(Self {
             network_id,
             device_id,
-            join_session_id,
+            provider_binding_id,
             expected_authenticated_peer_id,
             generation,
             expires_at,
@@ -2015,7 +2015,7 @@ impl N6BindingChallengeRequest {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), DomainError> {
         revalidate_n6_uuid_id(&self.network_id, NetworkId::parse)?;
         revalidate_n6_uuid_id(&self.device_id, DeviceId::parse)?;
-        revalidate_n6_uuid_id(&self.join_session_id, JoinSessionId::parse)?;
+        revalidate_n6_uuid_id(&self.provider_binding_id, ProviderBindingId::parse)?;
         revalidate_n6_peer_id(&self.expected_authenticated_peer_id)?;
         revalidate_n6_generation(self.generation)?;
         revalidate_n6_agent_version(&self.agent_version)?;
@@ -2031,8 +2031,8 @@ impl N6BindingChallengeRequest {
         self.device_id
     }
     #[must_use]
-    pub fn join_session_id(&self) -> JoinSessionId {
-        self.join_session_id
+    pub fn provider_binding_id(&self) -> ProviderBindingId {
+        self.provider_binding_id
     }
     #[must_use]
     pub fn expected_authenticated_peer_id(&self) -> &KeryxPeerId {
@@ -2120,7 +2120,7 @@ pub struct N6AuthenticatedBindRequest {
     operation_id: OperationId,
     network_id: NetworkId,
     device_id: DeviceId,
-    join_session_id: JoinSessionId,
+    provider_binding_id: ProviderBindingId,
     binding_nonce: BindingNonce,
     generation: Generation,
     agent_version: AgentVersion,
@@ -2131,7 +2131,7 @@ impl N6AuthenticatedBindRequest {
         operation_id: OperationId,
         network_id: NetworkId,
         device_id: DeviceId,
-        join_session_id: JoinSessionId,
+        provider_binding_id: ProviderBindingId,
         binding_nonce: BindingNonce,
         generation: Generation,
         agent_version: AgentVersion,
@@ -2139,14 +2139,14 @@ impl N6AuthenticatedBindRequest {
         revalidate_n6_operation_id(&operation_id)?;
         revalidate_n6_uuid_id(&network_id, NetworkId::parse)?;
         revalidate_n6_uuid_id(&device_id, DeviceId::parse)?;
-        revalidate_n6_uuid_id(&join_session_id, JoinSessionId::parse)?;
+        revalidate_n6_uuid_id(&provider_binding_id, ProviderBindingId::parse)?;
         revalidate_n6_generation(generation)?;
         revalidate_n6_agent_version(&agent_version)?;
         Ok(Self {
             operation_id,
             network_id,
             device_id,
-            join_session_id,
+            provider_binding_id,
             binding_nonce,
             generation,
             agent_version,
@@ -2172,8 +2172,8 @@ impl N6AuthenticatedBindRequest {
         self.device_id
     }
     #[must_use]
-    pub fn join_session_id(&self) -> JoinSessionId {
-        self.join_session_id
+    pub fn provider_binding_id(&self) -> ProviderBindingId {
+        self.provider_binding_id
     }
     #[must_use]
     pub fn agent_version(&self) -> &AgentVersion {

@@ -103,7 +103,7 @@ fn keryx_binding_identity_is_a_one_way_public_response() {
         KeryxBindingId::new(),
         NetworkId::new(),
         DeviceId::new(),
-        JoinSessionId::new(),
+        ProviderBindingId::new(),
         Generation::initial(),
         1,
         Utc::now(),

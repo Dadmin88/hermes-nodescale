@@ -682,7 +682,7 @@ const fn role_name(role: Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentVersion, JoinSessionId, KeryxBindingIdentityRecord, MembershipState};
+    use crate::{AgentVersion, KeryxBindingIdentityRecord, MembershipState, ProviderBindingId};
     use chrono::Utc;
 
     fn active_binding(
@@ -695,7 +695,7 @@ mod tests {
             binding_id: KeryxBindingId::new(),
             network_id,
             device_id,
-            join_session_id: JoinSessionId::new(),
+            provider_binding_id: ProviderBindingId::new(),
             verified_peer_id: Some(KeryxPeerId::parse("keryx-peer-n7").unwrap()),
             generation,
             revision: 1,
