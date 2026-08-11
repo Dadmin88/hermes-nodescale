@@ -8,8 +8,8 @@ use nodescale_domain::{
 };
 use nodescale_state::{
     N7AuthoritativeInspection, N7BindingProvenance, N7ProjectionAttemptOutcome,
-    N7ProjectionReservationOutcome, N7ProjectionState, N7ProjectionSubmission, StateError,
-    StateStore,
+    N7ProjectionReservationOutcome, N7ProjectionState, N7ProjectionSubmission,
+    SUPPORTED_SCHEMA_VERSION, StateError, StateStore,
 };
 use rusqlite::{Connection, params};
 use std::sync::{Arc, Barrier};
@@ -249,7 +249,7 @@ fn v6_database_upgrades_to_v7_with_n7_durable_tables() {
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     drop(store);
     let connection = Connection::open(path).unwrap();
     for table in [

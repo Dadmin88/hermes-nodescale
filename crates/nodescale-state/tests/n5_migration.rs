@@ -11,8 +11,7 @@ const MIGRATIONS: [&str; 4] = [
 #[test]
 fn fresh_schema_has_n5_tables_and_no_implicit_trust() {
     let store = StateStore::open_in_memory().unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 7);
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("fresh.db");

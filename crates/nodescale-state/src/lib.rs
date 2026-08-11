@@ -32,7 +32,7 @@ pub use n7::*;
 #[cfg(test)]
 mod n5_identity_trust_tests;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 8;
 pub const DEVICE_PAGE_MAX: usize = 32;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
@@ -44,6 +44,8 @@ const DEVICE_TRUST_MIGRATION: &str = include_str!("../migrations/0005_device_tru
 const KERYX_IDENTITY_BINDING_MIGRATION: &str =
     include_str!("../migrations/0006_keryx_identity_binding.sql");
 const FLEET_PROJECTION_MIGRATION: &str = include_str!("../migrations/0007_fleet_projection.sql");
+const EXISTING_DEVICE_ADOPTION_STATE_MIGRATION: &str =
+    include_str!("../migrations/0008_existing_device_adoption_state.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -267,6 +269,7 @@ pub struct ProviderObservation {
     pub classification: ObservationClassification,
     pub adoption_state: AdoptionState,
     pub semantic_fingerprint: String,
+    pub semantic_generation: u64,
     pub first_observed_at: DateTime<Utc>,
     pub last_observed_at: DateTime<Utc>,
     pub snapshot_at: DateTime<Utc>,
@@ -807,6 +810,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -826,6 +830,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -844,6 +849,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -861,6 +867,7 @@ impl StateStore {
                 .and_then(|()| connection.execute_batch(DEVICE_TRUST_MIGRATION))
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -877,6 +884,7 @@ impl StateStore {
                 .execute_batch(DEVICE_TRUST_MIGRATION)
                 .and_then(|()| connection.execute_batch(KERYX_IDENTITY_BINDING_MIGRATION))
                 .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -892,6 +900,7 @@ impl StateStore {
             let migration_result = connection
                 .execute_batch(KERYX_IDENTITY_BINDING_MIGRATION)
                 .and_then(|()| connection.execute_batch(FLEET_PROJECTION_MIGRATION))
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -906,6 +915,21 @@ impl StateStore {
             connection.execute_batch("BEGIN IMMEDIATE;")?;
             let migration_result = connection
                 .execute_batch(FLEET_PROJECTION_MIGRATION)
+                .and_then(|()| connection.execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION))
+                .and_then(|()| {
+                    connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
+                });
+            match migration_result {
+                Ok(()) => connection.execute_batch("COMMIT;")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK;");
+                    return Err(StateError::Sqlite(error));
+                }
+            }
+        } else if found == 7 {
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let migration_result = connection
+                .execute_batch(EXISTING_DEVICE_ADOPTION_STATE_MIGRATION)
                 .and_then(|()| {
                     connection.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)
                 });
@@ -2143,13 +2167,44 @@ impl StateStore {
                 let serialized = serde_json::to_string(&stored_node)?;
                 let first = previous.map(|old| old.first_observed_at).unwrap_or(snapshot_at);
                 let device_id = previous.and_then(|old| old.device_id);
-                tx.execute("INSERT INTO provider_observations (observation_id,network_id,device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'unmanaged',?8,?9,?10,?11,?12) ON CONFLICT(provider_instance_id,provider_node_id) DO UPDATE SET device_id=excluded.device_id,classification=excluded.classification,semantic_fingerprint=excluded.semantic_fingerprint,normalized_json=excluded.normalized_json,last_observed_at=excluded.last_observed_at,snapshot_at=excluded.snapshot_at", params![uuid::Uuid::new_v4().to_string(), network_id.to_string(), device_id.map(|id| id.to_string()), configured_instance.to_string(), key, previous.map(|old| old.stable_machine_key_fingerprint.clone()).unwrap_or_else(|| node.identity.stable_key_fingerprint.clone()), classification_name(classification), fingerprint, serialized, first.to_rfc3339(), snapshot_at.to_rfc3339(), snapshot_at.to_rfc3339()])?;
+                tx.execute("INSERT INTO provider_observations (observation_id,network_id,device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'unmanaged',?8,?9,?10,?11,?12) ON CONFLICT(provider_instance_id,provider_node_id) DO UPDATE SET device_id=excluded.device_id,classification=excluded.classification,semantic_fingerprint=excluded.semantic_fingerprint,semantic_generation=CASE WHEN provider_observations.classification<>excluded.classification OR provider_observations.semantic_fingerprint<>excluded.semantic_fingerprint THEN provider_observations.semantic_generation+1 ELSE provider_observations.semantic_generation END,normalized_json=excluded.normalized_json,last_observed_at=excluded.last_observed_at,snapshot_at=excluded.snapshot_at", params![uuid::Uuid::new_v4().to_string(), network_id.to_string(), device_id.map(|id| id.to_string()), configured_instance.to_string(), key, previous.map(|old| old.stable_machine_key_fingerprint.clone()).unwrap_or_else(|| node.identity.stable_key_fingerprint.clone()), classification_name(classification), fingerprint, serialized, first.to_rfc3339(), snapshot_at.to_rfc3339(), snapshot_at.to_rfc3339()])?;
+                if changed
+                    && previous.is_some_and(|old| {
+                        old.adoption_state == AdoptionState::PendingDeviceCredentialProof
+                    })
+                {
+                    let reason = match classification {
+                        ObservationClassification::ProviderExpired => "provider_expired",
+                        ObservationClassification::IdentityConflict => "identity_conflict",
+                        _ => "observation_changed",
+                    };
+                    terminalize_pending_adoption_for_observation(
+                        tx,
+                        network_id,
+                        previous.expect("checked above").canonical_provider_node_id.as_str(),
+                        previous.expect("checked above").semantic_generation + 1,
+                        reason,
+                        snapshot_at,
+                        &actor,
+                    )?;
+                }
             }
             for (key, old) in &existing {
                 if !incoming_ids.contains(key) && old.classification != ObservationClassification::ProviderMissing {
                     semantic_change = true;
                     changes.push((key.clone(), "provider_node_missing"));
-                    tx.execute("UPDATE provider_observations SET classification='provider_missing',snapshot_at=?3 WHERE provider_instance_id=?1 AND provider_node_id=?2", params![configured_instance.to_string(), key, snapshot_at.to_rfc3339()])?;
+                    tx.execute("UPDATE provider_observations SET classification='provider_missing',semantic_generation=semantic_generation+1,snapshot_at=?3 WHERE provider_instance_id=?1 AND provider_node_id=?2", params![configured_instance.to_string(), key, snapshot_at.to_rfc3339()])?;
+                    if old.adoption_state == AdoptionState::PendingDeviceCredentialProof {
+                        terminalize_pending_adoption_for_observation(
+                            tx,
+                            network_id,
+                            key,
+                            old.semantic_generation + 1,
+                            "provider_missing",
+                            snapshot_at,
+                            &actor,
+                        )?;
+                    }
                 }
             }
             if semantic_change {
@@ -2527,6 +2582,85 @@ impl StateStore {
     }
 }
 
+fn terminalize_pending_adoption_for_observation(
+    tx: &Transaction<'_>,
+    network_id: NetworkId,
+    provider_node_id: &str,
+    observation_generation: u64,
+    reason: &str,
+    now: DateTime<Utc>,
+    actor: &AuditActor,
+) -> Result<(), StateError> {
+    type PendingAction = (String, String, u64, String, String, u64);
+    let pending = tx
+        .query_row(
+            "SELECT action_id,authority_id,authority_generation,provider_instance_id,provider_node_id,proof_generation FROM n5_adoption_actions WHERE network_id=?1 AND provider_node_id=?2 AND action_state='proof_pending'",
+            params![network_id.to_string(), provider_node_id],
+            |row| -> rusqlite::Result<PendingAction> {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        action_id,
+        authority_id,
+        authority_generation,
+        provider_instance_id,
+        action_provider_node_id,
+        proof_generation,
+    )) = pending
+    else {
+        return Ok(());
+    };
+
+    let decision_id = uuid::Uuid::new_v4().to_string();
+    let audit_event_id = AuditEventId::new().to_string();
+    let safe_correlation_digest = format!("sha256:{:x}", Sha256::digest(action_id.as_bytes()));
+    tx.execute(
+        "INSERT INTO audit_events (event_id,timestamp,network_id,device_id,actor_source,actor_id,event_kind,outcome,generation,metadata_json) VALUES (?1,?2,?3,NULL,?4,?5,'device.adoption_action_conflicted','success',?6,'{}')",
+        params![
+            audit_event_id,
+            now.to_rfc3339(),
+            network_id.to_string(),
+            actor.source,
+            actor.actor_id,
+            i64::try_from(observation_generation).map_err(|_| {
+                StateError::Conflict("observation generation exceeds SQLite integer range".into())
+            })?,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO n5_adoption_decisions (decision_id,action_id,proof_operation_id,audit_event_id,decision_kind,prior_action_state,new_action_state,authority_id,authority_generation,network_id,provider_instance_id,provider_node_id,observation_generation,proof_generation,evidence_id,device_id,provider_binding_id,safe_correlation_digest,reason_code,decided_at_ms) VALUES (?1,?2,NULL,?3,'conflict','proof_pending','conflicted',?4,?5,?6,?7,?8,?9,?10,NULL,NULL,NULL,?11,?12,?13)",
+        params![
+            decision_id,
+            action_id,
+            audit_event_id,
+            authority_id,
+            authority_generation,
+            network_id.to_string(),
+            provider_instance_id,
+            action_provider_node_id,
+            observation_generation,
+            proof_generation,
+            safe_correlation_digest,
+            reason,
+            now.timestamp_millis(),
+        ],
+    )?;
+    tx.execute(
+        "UPDATE provider_observations SET adoption_state='unmanaged' WHERE network_id=?1 AND provider_node_id=?2 AND adoption_state='pending_device_credential_proof'",
+        params![network_id.to_string(), provider_node_id],
+    )?;
+    Ok(())
+}
+
 fn validate_snapshot(
     mut nodes: Vec<ProviderNode>,
     expected_instance: ProviderInstanceId,
@@ -2715,6 +2849,7 @@ type RawProviderObservation = (
     String,
     String,
     String,
+    u64,
     String,
     String,
     String,
@@ -2734,6 +2869,7 @@ fn read_raw_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawProvider
         row.get(8)?,
         row.get(9)?,
         row.get(10)?,
+        row.get(11)?,
     ))
 }
 
@@ -2749,6 +2885,7 @@ fn decode_observation(
         classification,
         adoption_state,
         semantic_fingerprint,
+        semantic_generation,
         normalized_json,
         first,
         last,
@@ -2780,6 +2917,7 @@ fn decode_observation(
         classification: parse_classification(&classification)?,
         adoption_state: parse_adoption_state(&adoption_state)?,
         semantic_fingerprint,
+        semantic_generation,
         first_observed_at,
         last_observed_at,
         snapshot_at,
@@ -2790,7 +2928,7 @@ fn load_observations(
     connection: &Connection,
     network_id: NetworkId,
 ) -> Result<BTreeMap<String, ProviderObservation>, StateError> {
-    let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 ORDER BY provider_node_id")?;
+    let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,semantic_generation,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 ORDER BY provider_node_id")?;
     let rows = statement.query_map([network_id.to_string()], read_raw_observation)?;
     let mut observations = BTreeMap::new();
     for row in rows {
@@ -2806,7 +2944,7 @@ fn load_observation_page(
     after_provider_node_id: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ProviderObservation>, StateError> {
-    let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 AND (?2 IS NULL OR provider_node_id>?2) ORDER BY provider_node_id LIMIT ?3")?;
+    let mut statement = connection.prepare("SELECT device_id,provider_instance_id,provider_node_id,stable_key_fingerprint,classification,adoption_state,semantic_fingerprint,semantic_generation,normalized_json,first_observed_at,last_observed_at,snapshot_at FROM provider_observations WHERE network_id=?1 AND (?2 IS NULL OR provider_node_id>?2) ORDER BY provider_node_id LIMIT ?3")?;
     let rows = statement.query_map(
         params![
             network_id.to_string(),

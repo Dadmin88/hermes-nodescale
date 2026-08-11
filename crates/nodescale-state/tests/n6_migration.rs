@@ -351,10 +351,9 @@ fn insert_pending_challenge(
 }
 
 #[test]
-fn fresh_schema_is_v7_and_retains_authoritative_n6_tables() {
+fn fresh_schema_retains_authoritative_n6_tables() {
     let store = StateStore::open_in_memory().unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 7);
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("fresh-v7.db");
@@ -439,7 +438,7 @@ fn every_supported_predecessor_upgrades_to_v7_without_losing_n5_or_n6_state() {
         drop(connection);
 
         let store = StateStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
         drop(store);
         let connection = Connection::open(path).unwrap();
         connection
