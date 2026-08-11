@@ -316,7 +316,7 @@ transition_enum!(
             MembershipState::Joining | MembershipState::Revoking | MembershipState::Revoked
         ) | (
             MembershipState::Joining,
-            MembershipState::Revoking | MembershipState::Revoked
+            MembershipState::Active | MembershipState::Revoking | MembershipState::Revoked
         ) | (
             MembershipState::Active,
             MembershipState::Suspended | MembershipState::Revoking
@@ -364,6 +364,7 @@ transition_enum!(
 pub enum DeviceTrustCapability {
     ActivateDeviceTrust,
     RevokeDeviceTrust,
+    AdoptExistingProviderDevice,
 }
 impl DeviceTrustCapability {
     #[must_use]
@@ -371,6 +372,7 @@ impl DeviceTrustCapability {
         match self {
             Self::ActivateDeviceTrust => "ActivateDeviceTrust",
             Self::RevokeDeviceTrust => "RevokeDeviceTrust",
+            Self::AdoptExistingProviderDevice => "AdoptExistingProviderDevice",
         }
     }
 }
@@ -1397,7 +1399,77 @@ impl FromStr for OwnerTrustRootToken {
     }
 }
 
-/// A persisted verifier only. It never contains a plaintext invitation or trust-root token.
+/// Opaque, single-action proof challenge for existing-provider adoption.
+/// The UUID is correlation-only; proof requires the random secret.
+pub struct AdoptionChallengeToken {
+    challenge_id: Uuid,
+    secret: [u8; N4_ARGON_OUTPUT_LEN],
+}
+impl AdoptionChallengeToken {
+    #[must_use]
+    pub fn generate() -> Self {
+        let mut secret = [0_u8; N4_ARGON_OUTPUT_LEN];
+        OsRng.fill_bytes(&mut secret);
+        Self {
+            challenge_id: Uuid::new_v4(),
+            secret,
+        }
+    }
+
+    #[must_use]
+    pub fn challenge_id(&self) -> String {
+        self.challenge_id.to_string()
+    }
+
+    pub fn with_encoded<R>(&self, f: impl FnOnce(&str) -> R) -> R {
+        let encoded = format!(
+            "nsadopt1_{}_{}",
+            self.challenge_id,
+            URL_SAFE_NO_PAD.encode(self.secret)
+        );
+        f(&encoded)
+    }
+
+    fn with_secret<R>(&self, f: impl FnOnce(&[u8; N4_ARGON_OUTPUT_LEN]) -> R) -> R {
+        f(&self.secret)
+    }
+}
+impl FromStr for AdoptionChallengeToken {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let invalid = || DomainError::InvalidValue {
+            kind: "adoption challenge",
+            reason: "malformed encoded secret",
+        };
+        let rest = value.strip_prefix("nsadopt1_").ok_or_else(invalid)?;
+        let (challenge_id, encoded) = rest.split_once('_').ok_or_else(invalid)?;
+        let challenge_id = challenge_id.parse::<Uuid>().map_err(|_| invalid())?;
+        let decoded = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
+        let secret: [u8; N4_ARGON_OUTPUT_LEN] = decoded.try_into().map_err(|_| invalid())?;
+        Ok(Self {
+            challenge_id,
+            secret,
+        })
+    }
+}
+impl Drop for AdoptionChallengeToken {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
+}
+impl fmt::Debug for AdoptionChallengeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AdoptionChallengeToken([REDACTED])")
+    }
+}
+impl fmt::Display for AdoptionChallengeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+/// A persisted verifier only. It never contains a plaintext invitation, trust-root token, or adoption challenge.
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SecretVerifier(String);
@@ -1427,6 +1499,11 @@ impl SecretVerifier {
 
     /// Builds a verifier for an N5 local-owner trust-root capability.
     pub fn from_trust_root_token(token: &OwnerTrustRootToken) -> Result<Self, DomainError> {
+        token.with_secret(|secret| Self::from_secret(secret))
+    }
+
+    /// Builds a verifier for one existing-provider adoption proof challenge.
+    pub fn from_adoption_challenge(token: &AdoptionChallengeToken) -> Result<Self, DomainError> {
         token.with_secret(|secret| Self::from_secret(secret))
     }
 
@@ -1473,6 +1550,14 @@ impl SecretVerifier {
 
     /// Verifies an N5 owner trust-root token without exposing its plaintext.
     pub fn verify_trust_root(&self, token: &OwnerTrustRootToken) -> Result<bool, DomainError> {
+        token.with_secret(|secret| self.verify_secret(secret))
+    }
+
+    /// Verifies one adoption challenge without exposing its plaintext.
+    pub fn verify_adoption_challenge(
+        &self,
+        token: &AdoptionChallengeToken,
+    ) -> Result<bool, DomainError> {
         token.with_secret(|secret| self.verify_secret(secret))
     }
 

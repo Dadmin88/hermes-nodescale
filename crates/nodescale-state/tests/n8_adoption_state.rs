@@ -29,8 +29,8 @@ fn v7_database_upgrades_through_v9_with_inert_v8_adoption_state_without_authorit
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 9);
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 10);
+    assert_eq!(store.schema_version().unwrap(), 10);
     drop(store);
 
     let connection = Connection::open(&path).unwrap();

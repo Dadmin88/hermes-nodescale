@@ -1,13 +1,15 @@
 use super::*;
 use chrono::Duration;
 use nodescale_domain::{
-    DeviceTrustAuthorityAdminIntent, DeviceTrustCapability, DeviceTrustState, OwnerTrustRootToken,
-    ProviderApiKey, ProviderBindingId, ProviderBindingState, SecretVerifier, TrustActionId,
-    TrustAuthorityId, TrustDecisionId, TrustDecisionKind, TrustRootId,
+    AdoptionChallengeToken, DeviceTrustAuthorityAdminIntent, DeviceTrustCapability,
+    DeviceTrustState, OwnerTrustRootToken, ProviderApiKey, ProviderBindingId, ProviderBindingState,
+    ProviderNodeId, SecretVerifier, TrustActionId, TrustAuthorityId, TrustDecisionId,
+    TrustDecisionKind, TrustRootId,
 };
 use nodescale_provider_headscale::{
     HeadscaleClientOptions, HeadscaleCustomRootCa, HeadscaleProvider,
 };
+use nodescale_provider_tailscale::{TailscaleAuth, TailscaleClientOptions, TailscaleProvider};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,6 +57,18 @@ impl N5ConfiguredHeadscaleProvider {
         }
         Ok(())
     }
+}
+
+pub struct N5ConfiguredTailscaleProvider {
+    network_id: NetworkId,
+    provider_instance_id: ProviderInstanceId,
+    expected_server_url: String,
+    provider: TailscaleProvider,
+}
+
+pub enum N5ConfiguredProvider {
+    Headscale(N5ConfiguredHeadscaleProvider),
+    Tailscale(N5ConfiguredTailscaleProvider),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,7 +222,192 @@ pub struct N5TrustDecisionResult {
     pub view: DeviceTrustView,
 }
 
+#[derive(Debug)]
+pub struct ExistingProviderAdoptionAction {
+    pub action_id: String,
+    pub network_id: NetworkId,
+    pub provider_node_id: String,
+    pub expected_observation_generation: u64,
+    pub challenge: AdoptionChallengeToken,
+}
+
+#[derive(Debug)]
+pub struct ExistingProviderAdoptionProof {
+    pub operation_id: String,
+    pub challenge: AdoptionChallengeToken,
+    pub target_origin_provider_node_id: String,
+    pub whois_provider_node_id: String,
+    pub whois_node_key: String,
+    pub local_provider_node_id: String,
+    pub local_node_key: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExistingProviderAdoptionOutcome {
+    Confirmed,
+    Replayed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExistingProviderAdoptionConfirmation {
+    pub outcome: ExistingProviderAdoptionOutcome,
+    pub device_id: DeviceId,
+    pub provider_binding_id: ProviderBindingId,
+    pub receipt_id: String,
+}
+
 impl StateStore {
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_existing_provider_adoption(
+        &self,
+        root_token: &OwnerTrustRootToken,
+        authority_id: TrustAuthorityId,
+        network_id: NetworkId,
+        provider_node_id: &str,
+        operation_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ExistingProviderAdoptionAction, StateError> {
+        if !safe_identifier(operation_id) || operation_id.len() > 128 {
+            return Err(StateError::Conflict("invalid adoption operation id".into()));
+        }
+        self.transactional(|tx, _store| {
+            let actor = verify_n5_owner_root(tx, root_token, network_id)?;
+            type ObservationRow = (String, String, String, u64, String, String, String, String);
+            let row = tx.query_row(
+                "SELECT o.observation_id,o.provider_instance_id,o.stable_key_fingerprint,o.semantic_generation,o.semantic_fingerprint,o.normalized_json,n.provider_kind,i.compatibility_pin FROM provider_observations o JOIN networks n ON n.network_id=o.network_id JOIN provider_imports i ON i.network_id=o.network_id WHERE o.network_id=?1 AND o.provider_node_id=?2 AND o.classification='discovered_unmanaged' AND o.adoption_state='unmanaged' AND o.device_id IS NULL",
+                params![network_id.to_string(), provider_node_id],
+                |row| -> rusqlite::Result<ObservationRow> { Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)) },
+            ).optional()?.ok_or_else(|| StateError::Conflict("adoption requires one exact unmanaged observation".into()))?;
+            let node: ProviderNode = serde_json::from_str(&row.5)?;
+            let machine_key = node.identity_evidence.machine_key.as_ref().ok_or_else(|| StateError::Conflict("adoption requires provider machine-key evidence".into()))?;
+            let node_key = node.identity_evidence.node_key.as_ref().ok_or_else(|| StateError::Conflict("adoption requires current node-key evidence".into()))?;
+            let machine_fingerprint = format!("sha256:{:x}", Sha256::digest(machine_key.as_str().as_bytes()));
+            let node_fingerprint = format!("sha256:{:x}", Sha256::digest(node_key.as_str().as_bytes()));
+            let request_fingerprint = format!("{:x}", Sha256::digest(format!("{operation_id}|{authority_id}|{network_id}|{}|{}|{}|{}|{}", row.0,row.1,provider_node_id,row.3,row.4).as_bytes()));
+            let action_id = uuid::Uuid::new_v4().to_string();
+            let challenge = AdoptionChallengeToken::generate();
+            let challenge_id = challenge.challenge_id();
+            let verifier = SecretVerifier::from_adoption_challenge(&challenge).map_err(|error| StateError::Conflict(error.to_string()))?;
+            let authority_generation: u64 = tx.query_row(
+                "SELECT authority_generation FROM n5_trust_authorities WHERE authority_id=?1 AND network_id=?2",
+                params![authority_id.to_string(), network_id.to_string()], |row| row.get(0),
+            ).optional()?.ok_or_else(|| StateError::MutationAuthorizationDenied("adoption authority is unavailable"))?;
+            let expires_at = now + Duration::minutes(5);
+            tx.execute("INSERT INTO n5_adoption_authorization_operations (operation_id,authority_id,authority_generation,network_id,observation_id,provider_instance_id,provider_node_id,expected_observation_generation,expected_observation_fingerprint,expected_semantic_fingerprint,expected_machine_key_fingerprint,expected_node_key_fingerprint,request_fingerprint,operation_state,outcome,action_id,receipt_id,created_at_ms,settled_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending',NULL,NULL,NULL,?14,NULL)", params![operation_id,authority_id.to_string(),authority_generation,network_id.to_string(),row.0,row.1,provider_node_id,row.3,row.2,row.4,machine_fingerprint,node_fingerprint,request_fingerprint,now.timestamp_millis()])?;
+            tx.execute("UPDATE n5_adoption_authorization_operations SET operation_state='settled',outcome='issued',action_id=?2,receipt_id=?3,settled_at_ms=?4 WHERE operation_id=?1", params![operation_id,action_id,format!("authorization:{action_id}"),now.timestamp_millis()])?;
+            tx.execute("INSERT INTO n5_adoption_actions (action_id,authorization_operation_id,authority_id,authority_generation,network_id,observation_id,provider_kind,provider_instance_id,provider_node_id,expected_observation_generation,expected_observation_fingerprint,expected_semantic_fingerprint,expected_machine_key_fingerprint,expected_node_key_fingerprint,proof_method,proof_generation,challenge_id,challenge_verifier,principal_source,principal_id,issued_at_ms,not_before_ms,expires_at_ms,action_state,terminal_decision_id,terminal_at_ms,terminal_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'tailscale_whois_provider_v1',1,?15,?16,?17,?18,?19,?19,?20,'proof_pending',NULL,NULL,NULL)", params![action_id,operation_id,authority_id.to_string(),authority_generation,network_id.to_string(),row.0,row.6,row.1,provider_node_id,row.3,row.2,row.4,machine_fingerprint,node_fingerprint,challenge_id,verifier.as_str(),actor.source,actor.actor_id,now.timestamp_millis(),expires_at.timestamp_millis()])?;
+            Ok(ExistingProviderAdoptionAction { action_id, network_id, provider_node_id: provider_node_id.to_owned(), expected_observation_generation: row.3, challenge })
+        })
+    }
+
+    pub async fn confirm_existing_provider_adoption(
+        &self,
+        provider: &dyn ReadOnlyProvider,
+        action: &ExistingProviderAdoptionAction,
+        proof: &ExistingProviderAdoptionProof,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<ExistingProviderAdoptionConfirmation, StateError> {
+        validate_n5_audit_actor(&actor)?;
+        if !safe_identifier(&proof.operation_id) || proof.operation_id.len() > 128 {
+            return Err(StateError::Conflict(
+                "invalid adoption proof operation id".into(),
+            ));
+        }
+        if proof.target_origin_provider_node_id != action.provider_node_id
+            || proof.whois_provider_node_id != action.provider_node_id
+            || proof.local_provider_node_id != action.provider_node_id
+            || proof.whois_node_key != proof.local_node_key
+        {
+            return Err(StateError::Conflict(
+                "target-origin identity proof does not agree".into(),
+            ));
+        }
+        let observation = self
+            .provider_observations(action.network_id)?
+            .into_iter()
+            .find(|entry| entry.canonical_provider_node_id == action.provider_node_id)
+            .ok_or_else(|| StateError::Conflict("adoption observation disappeared".into()))?;
+        if provider.instance_id() != observation.provider_instance_id {
+            return Err(StateError::Conflict(
+                "adoption provider instance mismatch".into(),
+            ));
+        }
+        let current = provider
+            .get_node(&observation.node.identity)
+            .await
+            .map_err(|error| StateError::Conflict(format!("provider re-read failed: {error}")))?
+            .ok_or_else(|| {
+                StateError::Conflict("provider node disappeared before adoption".into())
+            })?;
+        let machine_key = current
+            .identity_evidence
+            .machine_key
+            .as_ref()
+            .ok_or_else(|| {
+                StateError::Conflict("provider re-read omitted machine-key evidence".into())
+            })?;
+        let node_key = current.identity_evidence.node_key.as_ref().ok_or_else(|| {
+            StateError::Conflict("provider re-read omitted node-key evidence".into())
+        })?;
+        if current.expired
+            || current.identity.node_id.as_str() != action.provider_node_id
+            || node_key.as_str() != proof.whois_node_key
+        {
+            return Err(StateError::Conflict(
+                "provider re-read does not match target proof".into(),
+            ));
+        }
+        let machine_fingerprint = format!(
+            "sha256:{:x}",
+            Sha256::digest(machine_key.as_str().as_bytes())
+        );
+        let node_fingerprint = format!("sha256:{:x}", Sha256::digest(node_key.as_str().as_bytes()));
+        self.transactional(|tx, store| {
+            type Replay = (String, String, String);
+            if let Some((device,binding,receipt)) = tx.query_row("SELECT resulting_device_id,resulting_provider_binding_id,receipt_id FROM n5_adoption_proof_operations WHERE action_id=?1 AND operation_id=?2 AND operation_state='settled' AND outcome='confirmed'", params![action.action_id,proof.operation_id], |row| -> rusqlite::Result<Replay> { Ok((row.get(0)?,row.get(1)?,row.get(2)?)) }).optional()? {
+                return Ok(ExistingProviderAdoptionConfirmation { outcome: ExistingProviderAdoptionOutcome::Replayed, device_id: DeviceId::parse(&device).map_err(|error| StateError::Conflict(error.to_string()))?, provider_binding_id: ProviderBindingId::parse(&binding).map_err(|error| StateError::Conflict(error.to_string()))?, receipt_id: receipt });
+            }
+            type ActionRow = (String,u64,String,String,String,String,String,String,String,i64);
+            let persisted = tx.query_row("SELECT authority_id,authority_generation,observation_id,provider_kind,provider_instance_id,expected_observation_fingerprint,expected_semantic_fingerprint,expected_machine_key_fingerprint,expected_node_key_fingerprint,expires_at_ms FROM n5_adoption_actions WHERE action_id=?1 AND network_id=?2 AND provider_node_id=?3 AND action_state='proof_pending'", params![action.action_id,action.network_id.to_string(),action.provider_node_id], |row| -> rusqlite::Result<ActionRow> { Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)) }).optional()?.ok_or_else(|| StateError::Conflict("adoption action is not pending".into()))?;
+            if now.timestamp_millis() >= persisted.9 { return Err(StateError::Conflict("adoption action expired".into())); }
+            let verifier_text: String = tx.query_row("SELECT challenge_verifier FROM n5_adoption_actions WHERE action_id=?1 AND challenge_id=?2", params![action.action_id,proof.challenge.challenge_id()], |row| row.get(0)).optional()?.ok_or_else(|| StateError::Conflict("adoption challenge mismatch".into()))?;
+            let verifier = SecretVerifier::parse(verifier_text).map_err(|error| StateError::Conflict(error.to_string()))?;
+            if !verifier.verify_adoption_challenge(&proof.challenge).map_err(|error| StateError::Conflict(error.to_string()))? { return Err(StateError::Conflict("adoption challenge failed".into())); }
+            let request_fingerprint = format!("{:x}", Sha256::digest(format!("{}|{}|{}|{}|{}", action.action_id,proof.operation_id,action.provider_node_id,machine_fingerprint,node_fingerprint).as_bytes()));
+            tx.execute("INSERT INTO n5_adoption_proof_operations (action_id,operation_id,request_fingerprint,operation_state,outcome,receipt_id,resulting_device_id,resulting_provider_binding_id,created_at_ms,settled_at_ms) VALUES (?1,?2,?3,'pending',NULL,NULL,NULL,NULL,?4,NULL)", params![action.action_id,proof.operation_id,request_fingerprint,now.timestamp_millis()])?;
+            let current_observation: (u64,String,String,String) = tx.query_row("SELECT semantic_generation,stable_key_fingerprint,semantic_fingerprint,adoption_state FROM provider_observations WHERE observation_id=?1 AND device_id IS NULL", [persisted.2.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?.ok_or_else(|| StateError::Conflict("adoption observation is no longer available".into()))?;
+            if current_observation.0 != action.expected_observation_generation || current_observation.1 != persisted.5 || current_observation.2 != persisted.6 || current_observation.3 != "pending_device_credential_proof" || machine_fingerprint != persisted.7 || node_fingerprint != persisted.8 { return Err(StateError::Conflict("adoption proof is stale or substituted".into())); }
+            let device_id = DeviceId::new();
+            let binding_id = ProviderBindingId::new();
+            let evidence_id = uuid::Uuid::new_v4().to_string();
+            let decision_id = uuid::Uuid::new_v4().to_string();
+            let audit_id = AuditEventId::new().to_string();
+            let provider_identity = nodescale_domain::ProviderIdentity::new(observation.provider_instance_id, current.identity.node_id.clone(), machine_fingerprint.clone()).map_err(|error| StateError::Conflict(error.to_string()))?;
+            let mut device = Device::new(device_id, action.network_id, current.hostname.clone(), now).map_err(|error| StateError::Conflict(error.to_string()))?;
+            device.provider_identity = Some(provider_identity);
+            let record = serde_json::to_string(&device)?;
+            tx.execute("INSERT INTO devices (device_id,network_id,display_name,membership_state,provider_instance_id,provider_node_id,provider_key_fingerprint,credential_generation,keryx_binding_generation,fleet_projection_generation,fleet_projection_status,record_json,created_at,updated_at,revoked_at) VALUES (?1,?2,?3,'pending',?4,?5,?6,1,1,1,'notrequested',?7,?8,?8,NULL)", params![device_id.to_string(),action.network_id.to_string(),device.display_name,observation.provider_instance_id.to_string(),action.provider_node_id,machine_fingerprint,record,now.to_rfc3339()])?;
+            tx.execute("INSERT INTO device_generations (device_id,credential_generation,keryx_binding_generation,fleet_projection_generation,updated_at) VALUES (?1,1,1,1,?2)", params![device_id.to_string(),now.to_rfc3339()])?;
+            tx.execute("INSERT INTO n5_device_identities (device_id,network_id,identity_origin_kind,identity_origin_id,n4_origin_id,adoption_origin_id,confirmed_at_ms,identity_revision,safe_correlation_digest) VALUES (?1,?2,'existing_provider_adoption',?3,NULL,?3,?4,1,?5)", params![device_id.to_string(),action.network_id.to_string(),action.action_id,now.timestamp_millis(),format!("sha256:{:x}", Sha256::digest(format!("{}|{}|{}",action.action_id,device_id,action.provider_node_id).as_bytes()))])?;
+            tx.execute("INSERT INTO n5_provider_bindings (binding_id,device_id,network_id,provenance_kind,n4_provenance_binding_id,adoption_provenance_binding_id,provider_instance_id,provider_node_id,machine_key_fingerprint,binding_state,binding_revision,observed_at_ms) VALUES (?1,?2,?3,'existing_provider_adoption',NULL,?1,?4,?5,?6,'active',1,?7)", params![binding_id.to_string(),device_id.to_string(),action.network_id.to_string(),observation.provider_instance_id.to_string(),action.provider_node_id,machine_fingerprint,now.timestamp_millis()])?;
+            tx.execute("INSERT INTO n5_device_trust_state (device_id,network_id,trust_state,trust_revision,created_at_ms,activated_at_ms,revoked_at_ms,last_decision_id) VALUES (?1,?2,'untrusted',1,?3,NULL,NULL,NULL)", params![device_id.to_string(),action.network_id.to_string(),now.timestamp_millis()])?;
+            let compatibility_pin: String = tx.query_row("SELECT compatibility_pin FROM provider_imports WHERE network_id=?1", [action.network_id.to_string()], |row| row.get(0))?;
+            tx.execute("INSERT INTO n5_existing_adoption_evidence (evidence_id,action_id,proof_operation_id,network_id,provider_kind,provider_instance_id,provider_node_id,observation_fingerprint,observation_semantic_fingerprint,observation_generation,machine_key_fingerprint,node_key_fingerprint,proof_generation,proof_method,provider_compatibility_pin,verified_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1,'tailscale_whois_provider_v1',?13,?14)", params![evidence_id,action.action_id,proof.operation_id,action.network_id.to_string(),persisted.3,persisted.4,action.provider_node_id,persisted.5,persisted.6,current_observation.0,machine_fingerprint,node_fingerprint,compatibility_pin,now.timestamp_millis()])?;
+            if store.fail_before_audit.get() {
+                return Err(StateError::InjectedFailure);
+            }
+            tx.execute("INSERT INTO audit_events (event_id,timestamp,network_id,device_id,actor_source,actor_id,event_kind,outcome,generation,metadata_json) VALUES (?1,?2,?3,?4,?5,?6,'device.adoption_confirmed','success',?7,'{}')", params![audit_id,now.to_rfc3339(),action.network_id.to_string(),device_id.to_string(),actor.source,actor.actor_id,current_observation.0])?;
+            let correlation = format!("sha256:{:x}", Sha256::digest(format!("{}|{}|{}",action.action_id,device_id,binding_id).as_bytes()));
+            tx.execute("INSERT INTO n5_adoption_decisions (decision_id,action_id,proof_operation_id,audit_event_id,decision_kind,prior_action_state,new_action_state,authority_id,authority_generation,network_id,provider_instance_id,provider_node_id,observation_generation,proof_generation,evidence_id,device_id,provider_binding_id,safe_correlation_digest,reason_code,decided_at_ms) VALUES (?1,?2,?3,?4,'confirm','proof_pending','confirmed',?5,?6,?7,?8,?9,?10,1,?11,?12,?13,?14,'proof_confirmed',?15)", params![decision_id,action.action_id,proof.operation_id,audit_id,persisted.0,persisted.1,action.network_id.to_string(),persisted.4,action.provider_node_id,current_observation.0,evidence_id,device_id.to_string(),binding_id.to_string(),correlation,now.timestamp_millis()])?;
+            tx.execute("INSERT INTO n5_existing_adoption_identity_origins (origin_id,origin_kind,device_id,network_id,action_id,proof_operation_id,evidence_id,decision_id,provider_binding_id,provider_instance_id,provider_node_id,observation_generation,proof_generation,machine_key_fingerprint,node_key_fingerprint) VALUES (?1,'existing_provider_adoption',?2,?3,?1,?4,?5,?6,?7,?8,?9,?10,1,?11,?12)", params![action.action_id,device_id.to_string(),action.network_id.to_string(),proof.operation_id,evidence_id,decision_id,binding_id.to_string(),persisted.4,action.provider_node_id,current_observation.0,machine_fingerprint,node_fingerprint])?;
+            tx.execute("INSERT INTO n5_existing_adoption_provider_binding_provenance (binding_id,provenance_kind,device_id,network_id,identity_origin_kind,identity_origin_id,action_id,proof_operation_id,evidence_id,decision_id,provider_instance_id,provider_node_id,observation_generation,proof_generation,machine_key_fingerprint,node_key_fingerprint) VALUES (?1,'existing_provider_adoption',?2,?3,'existing_provider_adoption',?4,?4,?5,?6,?7,?8,?9,?10,1,?11,?12)", params![binding_id.to_string(),device_id.to_string(),action.network_id.to_string(),action.action_id,proof.operation_id,evidence_id,decision_id,persisted.4,action.provider_node_id,current_observation.0,machine_fingerprint,node_fingerprint])?;
+            tx.execute("UPDATE provider_observations SET device_id=?2,adoption_state='adopted' WHERE observation_id=?1 AND device_id IS NULL", params![persisted.2,device_id.to_string()])?;
+            let receipt_id: String = tx.query_row("SELECT receipt_id FROM n5_adoption_proof_operations WHERE action_id=?1 AND operation_id=?2", params![action.action_id,proof.operation_id], |row| row.get(0))?;
+            Ok(ExistingProviderAdoptionConfirmation { outcome: ExistingProviderAdoptionOutcome::Confirmed, device_id, provider_binding_id: binding_id, receipt_id })
+        })
+    }
+
     pub fn configured_n5_headscale_provider(
         &self,
         network_id: NetworkId,
@@ -279,6 +478,66 @@ impl StateStore {
         Ok(N5ConfiguredHeadscaleProvider {
             network_id,
             import_config,
+            provider,
+        })
+    }
+
+    pub fn configured_n5_tailscale_provider(
+        &self,
+        network_id: NetworkId,
+        tailnet: &str,
+        provider_instance_id: ProviderInstanceId,
+        api_key: ProviderApiKey,
+        options: TailscaleClientOptions,
+    ) -> Result<N5ConfiguredTailscaleProvider, StateError> {
+        let expected_server_url = format!("https://api.tailscale.com/api/v2/tailnet/{tailnet}");
+        let current: (String, String, bool, bool) = self.connection.borrow().query_row(
+            "SELECT server_url,compatibility_pin,read_only,mutation_allowed FROM provider_imports WHERE network_id=?1 AND provider_instance_id=?2",
+            params![network_id.to_string(), provider_instance_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?.ok_or_else(|| StateError::Conflict("configured provider import is absent".into()))?;
+        if current != (expected_server_url.clone(), "api-v2".into(), true, false) {
+            return Err(StateError::Conflict(
+                "configured Tailscale provider identity changed".into(),
+            ));
+        }
+        let provider = TailscaleProvider::new(
+            tailnet,
+            provider_instance_id,
+            TailscaleAuth::ApiAccessToken(api_key),
+            options,
+        )
+        .map_err(|_| StateError::Conflict("configured provider construction failed".into()))?;
+        Ok(N5ConfiguredTailscaleProvider {
+            network_id,
+            provider_instance_id,
+            expected_server_url,
+            provider,
+        })
+    }
+
+    pub fn configured_n5_tailscale_provider_from_runtime(
+        &self,
+        network_id: NetworkId,
+        tailnet: &str,
+        provider: TailscaleProvider,
+    ) -> Result<N5ConfiguredTailscaleProvider, StateError> {
+        let provider_instance_id = provider.instance_id();
+        let expected_server_url = format!("https://api.tailscale.com/api/v2/tailnet/{tailnet}");
+        let current: (String, String, bool, bool) = self.connection.borrow().query_row(
+            "SELECT server_url,compatibility_pin,read_only,mutation_allowed FROM provider_imports WHERE network_id=?1 AND provider_instance_id=?2",
+            params![network_id.to_string(), provider_instance_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?.ok_or_else(|| StateError::Conflict("configured provider import is absent".into()))?;
+        if current != (expected_server_url.clone(), "api-v2".into(), true, false) {
+            return Err(StateError::Conflict(
+                "configured Tailscale provider identity changed".into(),
+            ));
+        }
+        Ok(N5ConfiguredTailscaleProvider {
+            network_id,
+            provider_instance_id,
+            expected_server_url,
             provider,
         })
     }
@@ -818,6 +1077,78 @@ impl StateStore {
         )
     }
 
+    pub fn activate_trusted_device_membership(
+        &self,
+        root_token: &OwnerTrustRootToken,
+        authority_id: TrustAuthorityId,
+        device_id: DeviceId,
+        now: DateTime<Utc>,
+    ) -> Result<Device, StateError> {
+        self.transactional(|tx, store| {
+            let mut device: Device = tx
+                .query_row(
+                    "SELECT record_json FROM devices WHERE device_id=?1",
+                    [device_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|record| serde_json::from_str(&record))
+                .transpose()?
+                .ok_or_else(|| StateError::NotFound(device_id.to_string()))?;
+            let root_actor = verify_n5_owner_root(tx, root_token, device.network_id)?;
+            let principal_id = root_actor.actor_id.as_deref().ok_or(
+                StateError::MutationAuthorizationDenied("N5 owner root principal is absent"),
+            )?;
+            let authorized = tx.query_row(
+                "SELECT 1 FROM n5_trust_authorities authority JOIN n5_trust_authority_capabilities capability ON capability.authority_id=authority.authority_id WHERE authority.authority_id=?1 AND authority.network_id=?2 AND authority.trust_root_id=?3 AND authority.principal_source=?4 AND authority.principal_id=?5 AND authority.sealed=1 AND authority.enabled=1 AND authority.revoked_at_ms IS NULL AND authority.not_before_ms<=?6 AND authority.expires_at_ms>?6 AND capability.capability=?7",
+                params![authority_id.to_string(),device.network_id.to_string(),root_token.trust_root_id().to_string(),root_actor.source.as_str(),principal_id,now.timestamp_millis(),DeviceTrustCapability::ActivateDeviceTrust.as_str()],
+                |_| Ok(()),
+            ).optional()?.is_some();
+            if !authorized {
+                return Err(StateError::MutationAuthorizationDenied(
+                    "owner authority cannot activate device membership",
+                ));
+            }
+            let trusted = tx.query_row(
+                "SELECT 1 FROM n5_device_trust_state WHERE device_id=?1 AND network_id=?2 AND trust_state='trusted'",
+                params![device_id.to_string(),device.network_id.to_string()],
+                |_| Ok(()),
+            ).optional()?.is_some();
+            let provider_bound = tx.query_row(
+                "SELECT 1 FROM n5_provider_bindings WHERE device_id=?1 AND network_id=?2 AND binding_state='active'",
+                params![device_id.to_string(),device.network_id.to_string()],
+                |_| Ok(()),
+            ).optional()?.is_some();
+            if !trusted || !provider_bound {
+                return Err(StateError::ActivationGated);
+            }
+            if device.membership_state == MembershipState::Active {
+                return Ok(device);
+            }
+            device.membership_state = device
+                .membership_state
+                .transition(MembershipState::Joining)
+                .and_then(|state| state.transition(MembershipState::Active))
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            device.updated_at = now;
+            tx.execute(
+                "UPDATE devices SET membership_state='active',record_json=?2,updated_at=?3 WHERE device_id=?1",
+                params![device_id.to_string(),serde_json::to_string(&device)?,now.to_rfc3339()],
+            )?;
+            store.append_audit(
+                tx,
+                Some(device.network_id),
+                Some(device_id),
+                root_actor,
+                "device.membership_activated",
+                "success",
+                Some(device.generations.credential),
+                &SanitizedMetadata::empty(),
+            )?;
+            Ok(device)
+        })
+    }
+
     pub fn revoke_device_trust(
         &self,
         authorization: DeviceTrustAuthorization,
@@ -1112,6 +1443,53 @@ impl StateStore {
             .await
     }
 
+    pub async fn reconcile_n5_configured_provider(
+        &self,
+        provider: &N5ConfiguredProvider,
+        device_id: DeviceId,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<DeviceTrustView, StateError> {
+        match provider {
+            N5ConfiguredProvider::Headscale(provider) => {
+                self.reconcile_n5_provider_binding(provider, device_id, now, actor)
+                    .await
+            }
+            N5ConfiguredProvider::Tailscale(provider) => {
+                let current: Option<(String, String, bool, bool)> = self.connection.borrow().query_row(
+                    "SELECT server_url,compatibility_pin,read_only,mutation_allowed FROM provider_imports WHERE network_id=?1 AND provider_instance_id=?2",
+                    params![provider.network_id.to_string(), provider.provider_instance_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).optional()?;
+                if current
+                    != Some((
+                        provider.expected_server_url.clone(),
+                        "api-v2".into(),
+                        true,
+                        false,
+                    ))
+                {
+                    return Err(StateError::Conflict(
+                        "configured Tailscale provider identity changed".into(),
+                    ));
+                }
+                let view = self.persisted_device_trust_view(device_id)?;
+                if view.network_id != provider.network_id {
+                    return Err(StateError::Conflict(
+                        "configured provider network does not match device".into(),
+                    ));
+                }
+                self.reconcile_n5_provider_binding_from_provider(
+                    &provider.provider,
+                    device_id,
+                    now,
+                    actor,
+                )
+                .await
+            }
+        }
+    }
+
     pub(crate) async fn reconcile_n5_provider_binding_from_provider<P: ReadOnlyProvider>(
         &self,
         provider: &P,
@@ -1121,51 +1499,136 @@ impl StateStore {
     ) -> Result<DeviceTrustView, StateError> {
         validate_n5_audit_actor(&actor)?;
         let view = self.persisted_device_trust_view(device_id)?;
-        let Some(binding) = view
-            .provider_binding
-            .as_ref()
-            .filter(|binding| binding.binding_state == ProviderBindingState::Active)
-        else {
+        enum ReconciliationBinding {
+            Join(N5DeviceIdentity),
+            Adoption {
+                provider_identity: nodescale_domain::ProviderIdentity,
+                binding_revision: Generation,
+                node_key_fingerprint: String,
+            },
+        }
+        let provenance_kind: Option<String> = self
+            .connection
+            .borrow()
+            .query_row(
+                "SELECT provenance_kind FROM n5_provider_bindings WHERE device_id=?1 AND binding_state='active'",
+                [device_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let binding = match provenance_kind.as_deref() {
+            None => None,
+            Some("n4_join_session") => Some(ReconciliationBinding::Join(
+                view.provider_binding
+                    .as_ref()
+                    .filter(|binding| binding.binding_state == ProviderBindingState::Active)
+                    .cloned()
+                    .ok_or_else(|| {
+                        StateError::Conflict(
+                            "active N4 provider binding has no exact N4 provenance view".into(),
+                        )
+                    })?,
+            )),
+            Some("existing_provider_adoption") => {
+                type AdoptionBindingRow = (String, String, String, u64, String);
+                self.connection
+                    .borrow()
+                    .query_row(
+                        "SELECT b.provider_instance_id,b.provider_node_id,b.machine_key_fingerprint,b.binding_revision,p.node_key_fingerprint \
+                         FROM n5_provider_bindings b \
+                         JOIN n5_existing_adoption_provider_binding_provenance p \
+                           ON p.binding_id=b.adoption_provenance_binding_id \
+                          AND p.device_id=b.device_id AND p.network_id=b.network_id \
+                          AND p.provider_instance_id=b.provider_instance_id \
+                          AND p.provider_node_id=b.provider_node_id \
+                          AND p.machine_key_fingerprint=b.machine_key_fingerprint \
+                         WHERE b.device_id=?1 AND b.provenance_kind='existing_provider_adoption' \
+                           AND b.binding_state='active'",
+                        [device_id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .map(
+                        |row: AdoptionBindingRow| -> Result<ReconciliationBinding, StateError> {
+                            Ok(ReconciliationBinding::Adoption {
+                                provider_identity: nodescale_domain::ProviderIdentity::new(
+                                    ProviderInstanceId::parse(&row.0).map_err(|error| {
+                                        StateError::Conflict(error.to_string())
+                                    })?,
+                                    ProviderNodeId::parse(row.1).map_err(|error| {
+                                        StateError::Conflict(error.to_string())
+                                    })?,
+                                    row.2,
+                                )
+                                .map_err(|error| StateError::Conflict(error.to_string()))?,
+                                binding_revision: generation(row.3)?,
+                                node_key_fingerprint: row.4,
+                            })
+                        },
+                    )
+                    .transpose()?
+            }
+            Some(_) => {
+                return Err(StateError::Conflict(
+                    "active N5 provider binding has unknown provenance".into(),
+                ));
+            }
+        };
+        let Some(binding) = binding else {
             return Ok(view);
         };
-        if provider.instance_id() != binding.provider_identity.provider_instance_id {
+        let provider_identity = match &binding {
+            ReconciliationBinding::Join(binding) => &binding.provider_identity,
+            ReconciliationBinding::Adoption {
+                provider_identity, ..
+            } => provider_identity,
+        };
+        let binding_revision = match &binding {
+            ReconciliationBinding::Join(binding) => binding.binding_revision,
+            ReconciliationBinding::Adoption {
+                binding_revision, ..
+            } => *binding_revision,
+        };
+        if provider.instance_id() != provider_identity.provider_instance_id {
             return Err(StateError::Conflict(
                 "N5 provider reconciliation used the wrong provider instance".into(),
             ));
         }
-        let observed = match provider.get_node(&binding.provider_identity).await {
+        let observed = match provider.get_node(provider_identity).await {
             Ok(observed) => observed,
             Err(error) => {
-                self.mark_n5_provider_binding_stale(
-                    device_id,
-                    binding.binding_revision,
-                    now,
-                    actor,
-                )?;
+                self.mark_n5_provider_binding_stale(device_id, binding_revision, now, actor)?;
                 return Err(StateError::Conflict(format!(
                     "N5 provider reconciliation failed and binding was staled: {error}"
                 )));
             }
         };
-        let remains_exact = observed.as_ref().is_some_and(|node| {
-            node.identity == binding.provider_identity
-                && node.pre_auth.as_ref().is_some_and(|association| {
-                    association.credential_id == binding.provider_reference.as_str()
-                        && association.association
-                            == PreAuthAssociationStrength::ProviderAuthenticatedRegistration
-                })
-                && node.expires_at.is_none_or(|expires_at| expires_at > now)
-                && !node.expired
-                && node
-                    .identity_evidence
-                    .machine_key
-                    .as_ref()
-                    .is_some_and(|machine_key| {
-                        format!(
-                            "sha256:{:x}",
-                            Sha256::digest(machine_key.as_str().as_bytes())
-                        ) == binding.provider_identity.stable_key_fingerprint
+        let remains_exact = observed.as_ref().is_some_and(|node| match &binding {
+            ReconciliationBinding::Join(binding) => {
+                provider_node_identity_remains_exact(node, provider_identity, now)
+                    && node.pre_auth.as_ref().is_some_and(|association| {
+                        association.credential_id == binding.provider_reference.as_str()
+                            && association.association
+                                == PreAuthAssociationStrength::ProviderAuthenticatedRegistration
                     })
+            }
+            ReconciliationBinding::Adoption {
+                node_key_fingerprint,
+                ..
+            } => adopted_provider_node_remains_exact(
+                node,
+                provider_identity,
+                node_key_fingerprint,
+                now,
+            ),
         });
         if remains_exact {
             let mut provider_fresh_view = view;
@@ -1173,8 +1636,45 @@ impl StateStore {
                 provider_fresh_view.trust_state == DeviceTrustState::Trusted;
             return Ok(provider_fresh_view);
         }
-        self.mark_n5_provider_binding_stale(device_id, binding.binding_revision, now, actor)
+        self.mark_n5_provider_binding_stale(device_id, binding_revision, now, actor)
     }
+}
+
+fn provider_node_identity_remains_exact(
+    node: &nodescale_provider::ProviderNode,
+    provider_identity: &nodescale_domain::ProviderIdentity,
+    now: DateTime<Utc>,
+) -> bool {
+    node.identity == *provider_identity
+        && node.expires_at.is_none_or(|expires_at| expires_at > now)
+        && !node.expired
+        && node
+            .identity_evidence
+            .machine_key
+            .as_ref()
+            .is_some_and(|machine_key| {
+                format!(
+                    "sha256:{:x}",
+                    Sha256::digest(machine_key.as_str().as_bytes())
+                ) == provider_identity.stable_key_fingerprint
+            })
+}
+
+fn adopted_provider_node_remains_exact(
+    node: &nodescale_provider::ProviderNode,
+    provider_identity: &nodescale_domain::ProviderIdentity,
+    node_key_fingerprint: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    provider_node_identity_remains_exact(node, provider_identity, now)
+        && node
+            .identity_evidence
+            .node_key
+            .as_ref()
+            .is_some_and(|node_key| {
+                format!("sha256:{:x}", Sha256::digest(node_key.as_str().as_bytes()))
+                    == node_key_fingerprint
+            })
 }
 
 fn validate_n5_principal(source: &str, principal_id: &str) -> Result<(), StateError> {
@@ -1432,4 +1932,63 @@ fn safe_n5_digest(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod adoption_reconciliation_tests {
+    use super::*;
+    use nodescale_provider::{
+        ConditionalIdentityEvidence, MutableIdentityEvidence, ProviderIdentityEvidence,
+        ProviderNode,
+    };
+
+    #[test]
+    fn adopted_tailscale_binding_uses_exact_keys_without_n4_pre_auth() {
+        let now = DateTime::from_timestamp_millis(1_786_406_400_000).unwrap();
+        let machine_key = "mkey:adopted-machine";
+        let node_key = "nodekey:adopted-current";
+        let identity = nodescale_domain::ProviderIdentity::new(
+            ProviderInstanceId::new(),
+            ProviderNodeId::parse("nAdoptedCNTRL").unwrap(),
+            format!("sha256:{:x}", Sha256::digest(machine_key.as_bytes())),
+        )
+        .unwrap();
+        let mut node = ProviderNode {
+            identity: identity.clone(),
+            identity_evidence: ProviderIdentityEvidence {
+                machine_key: Some(ConditionalIdentityEvidence::new(machine_key).unwrap()),
+                node_key: Some(MutableIdentityEvidence::new(node_key).unwrap()),
+                disco_key: None,
+            },
+            hostname: "adopted".into(),
+            given_name: "adopted.example.ts.net".into(),
+            addresses: vec!["192.0.2.10".into()],
+            user: None,
+            pre_auth: None,
+            tags: BTreeSet::new(),
+            registered_at: Some(now),
+            last_seen: Some(now),
+            expires_at: None,
+            observed_at: now,
+            online: None,
+            expired: false,
+        };
+        let node_key_fingerprint = format!("sha256:{:x}", Sha256::digest(node_key.as_bytes()));
+
+        assert!(adopted_provider_node_remains_exact(
+            &node,
+            &identity,
+            &node_key_fingerprint,
+            now,
+        ));
+
+        node.identity_evidence.node_key =
+            Some(MutableIdentityEvidence::new("nodekey:rotated").unwrap());
+        assert!(!adopted_provider_node_remains_exact(
+            &node,
+            &identity,
+            &node_key_fingerprint,
+            now,
+        ));
+    }
 }

@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use nodescale_domain::{ProviderApiKey, ProviderIdentity, ProviderInstanceId, ProviderNodeId};
 use nodescale_provider::{
-    CompatibilityReport, CompatibilityStatus, ConditionalIdentityEvidence, ProviderCapability,
-    ProviderError, ProviderHealth, ProviderHealthStatus, ProviderIdentityEvidence, ProviderNode,
-    ReadOnlyProvider, ServerInspection,
+    CompatibilityReport, CompatibilityStatus, ConditionalIdentityEvidence, MutableIdentityEvidence,
+    ProviderCapability, ProviderError, ProviderHealth, ProviderHealthStatus,
+    ProviderIdentityEvidence, ProviderNode, ReadOnlyProvider, ServerInspection,
 };
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
 use serde::Deserialize;
@@ -141,6 +141,7 @@ impl TailscaleProvider {
             .push("tailnet")
             .push(&self.tailnet)
             .push("devices");
+        url.query_pairs_mut().append_pair("fields", "all");
         Ok(url)
     }
 
@@ -299,6 +300,8 @@ struct RawDevice {
     #[serde(default)]
     machine_key: String,
     #[serde(default)]
+    node_key: String,
+    #[serde(default)]
     created: Option<DateTime<Utc>>,
     #[serde(default)]
     last_seen: Option<DateTime<Utc>>,
@@ -368,12 +371,20 @@ pub fn parse_devices_fixture(
                 })?,
             )
         };
+        let node_key = if raw.node_key.is_empty() {
+            None
+        } else {
+            Some(
+                MutableIdentityEvidence::new(raw.node_key)
+                    .map_err(|_| ProviderError::MalformedResponse("invalid Tailscale nodeKey"))?,
+            )
+        };
         let expired = !raw.authorized || raw.expires.is_some_and(|expiry| expiry <= observed_at);
         nodes.push(ProviderNode {
             identity,
             identity_evidence: ProviderIdentityEvidence {
                 machine_key,
-                node_key: None,
+                node_key,
                 disco_key: None,
             },
             hostname: raw.hostname,
@@ -553,7 +564,9 @@ mod tests {
         );
         assert_eq!(provider.list_nodes().await.unwrap().len(), 1);
         let request = request.await.unwrap();
-        assert!(request.starts_with("GET /api/v2/tailnet/example.com/devices HTTP/1.1\r\n"));
+        assert!(
+            request.starts_with("GET /api/v2/tailnet/example.com/devices?fields=all HTTP/1.1\r\n")
+        );
         let expected = STANDARD.encode(format!("{value}:"));
         assert!(request.contains(&format!("authorization: Basic {expected}\r\n")));
     }

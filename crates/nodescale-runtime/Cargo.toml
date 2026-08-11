@@ -9,9 +9,15 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
+keryx-proto.workspace = true
+keryx-relay.workspace = true
 libc = "0.2"
 nix = { version = "0.30", features = ["fs", "socket", "user"] }
 nodescale-domain = { path = "../nodescale-domain" }
+nodescale-binding = { path = "../nodescale-binding" }
+nodescale-fleet-client = { path = "../nodescale-fleet-client" }
+nodescale-keryx-adapter = { path = "../nodescale-keryx-adapter" }
+nodescale-projection = { path = "../nodescale-projection" }
 nodescale-provider = { path = "../nodescale-provider" }
 nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }
 nodescale-provider-tailscale = { path = "../nodescale-provider-tailscale" }
@@ -22,6 +28,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
+tonic.workspace = true
 
 [dev-dependencies]
 nodescale-provider-fake = { path = "../nodescale-provider-fake" }

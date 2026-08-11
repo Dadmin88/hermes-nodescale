@@ -47,7 +47,7 @@ fn n7_schema(connection: &Connection) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn v8_opens_to_v9_typed_provenance_without_rewriting_n7_schema() {
+fn v8_opens_through_v10_without_rewriting_n7_schema_or_allowing_partial_adoption_rows() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("v9-typed-provenance.db");
     let connection = Connection::open(&path).unwrap();
@@ -64,8 +64,8 @@ fn v8_opens_to_v9_typed_provenance_without_rewriting_n7_schema() {
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 9);
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 10);
+    assert_eq!(store.schema_version().unwrap(), 10);
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
@@ -155,14 +155,11 @@ fn v8_opens_to_v9_typed_provenance_without_rewriting_n7_schema() {
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .unwrap();
     assert_eq!(integrity, "ok");
-    for (table, expected) in [
-        (
-            "n5_existing_adoption_identity_origins",
-            "V9 does not create adopted identities",
-        ),
+    for (table, required_column) in [
+        ("n5_existing_adoption_identity_origins", "origin_kind"),
         (
             "n5_existing_adoption_provider_binding_provenance",
-            "V9 does not create adoption provider bindings",
+            "provenance_kind",
         ),
     ] {
         let error = connection
@@ -170,8 +167,8 @@ fn v8_opens_to_v9_typed_provenance_without_rewriting_n7_schema() {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains(expected),
-            "unexpected adoption blocker: {error}"
+            error.contains("NOT NULL constraint failed") && error.contains(required_column),
+            "partial adoption provenance was not rejected by typed requirements: {error}"
         );
     }
 }
@@ -202,7 +199,7 @@ fn two_v8_openers_serialize_one_v9_migration() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let store = StateStore::open(path).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 9);
+            assert_eq!(store.schema_version().unwrap(), 10);
         }));
     }
     barrier.wait();
@@ -306,7 +303,7 @@ fn v9_transaction_rollback_and_failed_open_leave_exact_v8_and_no_temp_residue() 
         .unwrap();
     drop(connection);
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
 }
 
 #[test]
@@ -362,7 +359,7 @@ fn process_crash_before_v9_marker_restores_exact_v8_and_retry_succeeds() {
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     drop(store);
     let connection = Connection::open(path).unwrap();
     assert_eq!(

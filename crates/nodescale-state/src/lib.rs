@@ -32,7 +32,7 @@ pub use n7::*;
 #[cfg(test)]
 mod n5_identity_trust_tests;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 9;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 10;
 pub const DEVICE_PAGE_MAX: usize = 32;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
@@ -48,6 +48,8 @@ const EXISTING_DEVICE_ADOPTION_STATE_MIGRATION: &str =
     include_str!("../migrations/0008_existing_device_adoption_state.sql");
 const TYPED_N5_PROVENANCE_MIGRATION: &str =
     include_str!("../migrations/0009_typed_n5_provenance.sql");
+const EXISTING_PROVIDER_ADOPTION_ACTIVATION_MIGRATION: &str =
+    include_str!("../migrations/0010_existing_provider_adoption_activation.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -258,6 +260,7 @@ pub enum ObservationClassification {
 pub enum AdoptionState {
     Unmanaged,
     PendingDeviceCredentialProof,
+    Adopted,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -971,11 +974,12 @@ impl StateStore {
                 FLEET_PROJECTION_MIGRATION,
                 EXISTING_DEVICE_ADOPTION_STATE_MIGRATION,
                 TYPED_N5_PROVENANCE_MIGRATION,
+                EXISTING_PROVIDER_ADOPTION_ACTIVATION_MIGRATION,
             ];
             for migration in migrations.iter().skip(found as usize) {
                 connection.execute_batch(migration)?;
             }
-            if found < SUPPORTED_SCHEMA_VERSION {
+            if found < 9 {
                 verify_v9_migration_parity(&connection)?;
                 connection.execute_batch(DROP_V9_STAGING)?;
             }
@@ -2896,6 +2900,7 @@ fn parse_adoption_state(value: &str) -> Result<AdoptionState, StateError> {
     match value {
         "unmanaged" => Ok(AdoptionState::Unmanaged),
         "pending_device_credential_proof" => Ok(AdoptionState::PendingDeviceCredentialProof),
+        "adopted" => Ok(AdoptionState::Adopted),
         _ => Err(StateError::Conflict(
             "unknown provider observation adoption state".into(),
         )),
