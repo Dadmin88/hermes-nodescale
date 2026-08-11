@@ -9,6 +9,11 @@ network_name = "Headscale network"
 # [observation_api]
 # socket_path = "/var/lib/nodescale/observations.sock"
 # peer_uid = 999
+#
+# The operator-control API is a separate, read-only-by-default authority surface.
+# [operator_api]
+# socket_path = "/var/lib/nodescale/operator.sock"
+# peer_uid = 999
 
 [provider]
 kind = "headscale"

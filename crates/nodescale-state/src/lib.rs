@@ -33,6 +33,7 @@ pub use n7::*;
 mod n5_identity_trust_tests;
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
+pub const DEVICE_PAGE_MAX: usize = 32;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
 const MUTATION_AUTHORIZATION_MIGRATION: &str =
@@ -1792,6 +1793,36 @@ impl StateStore {
             .optional()?
             .ok_or_else(|| StateError::NotFound(device_id.to_string()))?;
         Ok(serde_json::from_str(&record)?)
+    }
+
+    /// Bounded stable page used by the authenticated operator contract.
+    pub fn operator_device_page(
+        &self,
+        network_id: NetworkId,
+        after: Option<DeviceId>,
+        limit: usize,
+    ) -> Result<Vec<Device>, StateError> {
+        if !(1..=DEVICE_PAGE_MAX).contains(&limit) {
+            return Err(StateError::Conflict(
+                "operator device page limit is out of bounds".into(),
+            ));
+        }
+        let after = after.map(|device_id| device_id.to_string());
+        let connection = self.connection.borrow();
+        let mut statement = connection.prepare(
+            "SELECT record_json FROM devices \
+             WHERE network_id=?1 AND (?2 IS NULL OR device_id>?2) \
+             ORDER BY device_id ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![network_id.to_string(), after, limit as u64],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut devices = Vec::with_capacity(limit);
+        for row in rows {
+            devices.push(serde_json::from_str(&row?)?);
+        }
+        Ok(devices)
     }
 
     pub fn device_generations(&self, device_id: DeviceId) -> Result<DeviceGenerations, StateError> {

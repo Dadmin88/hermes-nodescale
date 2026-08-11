@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 chrono.workspace = true
 libc = "0.2"
-nix = { version = "0.30", features = ["socket", "user"] }
+nix = { version = "0.30", features = ["fs", "socket", "user"] }
 nodescale-domain = { path = "../nodescale-domain" }
 nodescale-provider = { path = "../nodescale-provider" }
 nodescale-provider-headscale = { path = "../nodescale-provider-headscale" }

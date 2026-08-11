@@ -2,6 +2,8 @@
 
 mod observation_uds;
 pub use observation_uds::{ObservationApiConfig, ObservationUdsListener};
+mod operator_uds;
+pub use operator_uds::{OperatorApiConfig, OperatorUdsListener};
 
 use chrono::Utc;
 use nodescale_domain::{
@@ -36,6 +38,8 @@ pub struct RuntimeConfig {
     pub provider: ProviderConfig,
     #[serde(default)]
     pub observation_api: Option<ObservationApiConfig>,
+    #[serde(default)]
+    pub operator_api: Option<OperatorApiConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -109,6 +113,9 @@ impl RuntimeConfig {
         }
         self.provider.validate()?;
         if let Some(api) = &self.observation_api {
+            api.validate()?;
+        }
+        if let Some(api) = &self.operator_api {
             api.validate()?;
         }
         Ok(())

@@ -22,6 +22,16 @@ The protocol version is `nodescale.observations.v1`. A client writes one big-end
 
 Responses are explicitly projected durable current-state observations. They expose an opaque deterministic observation ID, provider/network identifiers, bounded display/network fields, provider liveness/timestamps/classification, and a separate reconciliation freshness summary. They never expose device IDs, fingerprints, provider user data, credential correlation, keys, secrets, audit/trust/readiness/operations state, or Fleet/N5/N6/N7 data. Reads never reconcile a provider or mutate Nodescale state.
 
+## Optional same-UID operator-control socket
+
+The separate `[operator_api]` listener is disabled unless configured explicitly. It uses the same private-parent, exact `SO_PEERCRED` UID, mode `0600`, and owned-inode cleanup rules as the observation socket, but it has a separate path and protocol. An adjacent mode-`0600` advisory owner lock survives a crash while its process ownership does not; startup removes only a stale same-owner mode-`0600` socket after obtaining that lock, refuses active or unsafe incumbents, and never removes a replacement inode it does not own. Provider observation access never inherits operator authority.
+
+The first contract slice is `nodescale.operator.v1` and is deliberately read-only. Its only request kinds are `capabilities`, bounded `devices.list`, and exact `devices.inspect`. `capabilities` advertises an empty mutation-operation set. Requests use one big-endian u32 length-prefixed JSON document followed by write-half close; unknown, duplicate, malformed, trailing, truncated, and oversized input is rejected with fixed error categories. Device pages are scoped to one exact network and use canonical device IDs as stable current-state cursors. Responses are capped at 64 KiB.
+
+Operator device records expose durable Nodescale-owned identity, membership lifecycle, generation, projection-status, N5 trust-state/revision, provider-binding lifecycle, and latest N6 binding evidence. They never expose provider stable-key fingerprints, provider credential references, trust roots, authorizations, invitation tokens, nonces, or other secret material. This read path does **not** reconcile a provider: `live_trust_evidence` is therefore `not_reconciled_by_operator_read`. N6 lifecycle evidence is not transport-health evidence, so `live_keryx_binding_health` remains `not_exposed`. No value in this API grants Fleet admission, scheduler readiness, or execution permission.
+
+Trust/revoke and invitation operations remain unavailable until later Phase 4 slices add individually typed, revision-fenced mutations with authoritative read-back. Fleet must consume this contract and must never query Nodescale SQLite directly.
+
 ## Deliberate N7 boundary
 
 The daemon does **not** automatically project to Fleet. The earlier automatic loop was removed because unchanged polls advanced projection generations and eligibility withdrawal could leave stale Fleet authority active.
@@ -69,7 +79,7 @@ sudo install -d -m0710 -o root -g nodescale /etc/nodescale
 sudo install -m0640 -o root -g nodescale config/runtime.tailscale.example.toml /etc/nodescale/runtime.toml
 ```
 
-The resulting configuration ownership is `root:nodescale`; the runtime account cannot rewrite its provider selection, identity, paths, or credential reference. The system unit leaves the API disabled because the installed example has no `[observation_api]` section. Do not add a socket path until the owner has selected a same-UID local consumer and a service-owned `0700` parent directory.
+The resulting configuration ownership is `root:nodescale`; the runtime account cannot rewrite its provider selection, identity, paths, or credential reference. The system unit leaves both local APIs disabled because the installed example has no active `[observation_api]` or `[operator_api]` section. Do not add a socket path until the owner has selected a same-UID local consumer and a service-owned `0700` parent directory.
 
 Edit the installed config with owner-selected IDs before activation. Do not enable the unit while example values remain.
 

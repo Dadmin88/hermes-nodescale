@@ -107,6 +107,7 @@ fn config(state_path: PathBuf, socket_path: PathBuf) -> RuntimeConfig {
             socket_path,
             peer_uid: nix::unistd::geteuid().as_raw(),
         }),
+        operator_api: None,
     }
 }
 
