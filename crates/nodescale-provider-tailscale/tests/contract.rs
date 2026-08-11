@@ -88,6 +88,25 @@ fn machine_key_is_optional_evidence_and_deauthorization_fails_safe() {
 }
 
 #[test]
+fn fields_all_node_key_is_preserved_as_mutable_adoption_evidence() {
+    let instance = ProviderInstanceId::new();
+    let observed_at = Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap();
+    let raw = device("node-with-keys", "mkey:provider-evidence", true).replace(
+        "\"machineKey\":\"mkey:provider-evidence\"",
+        "\"machineKey\":\"mkey:provider-evidence\",\"nodeKey\":\"nodekey:current-evidence\"",
+    );
+    let node = parse_devices_fixture(&fixture(&raw), instance, observed_at)
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(
+        node.identity_evidence.node_key.unwrap().as_str(),
+        "nodekey:current-evidence"
+    );
+}
+
+#[test]
 fn duplicate_canonical_node_ids_fail_closed() {
     let instance = ProviderInstanceId::new();
     let observed_at = Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap();

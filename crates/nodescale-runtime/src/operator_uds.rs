@@ -720,7 +720,7 @@ mod tests {
             network_id: trust.network_id,
             device_id: trust.device_id,
             provider_binding_id: ProviderBindingId::new(),
-            join_session_id: JoinSessionId::new(),
+            join_session_id: Some(JoinSessionId::new()),
             verified_peer_id: Some(KeryxPeerId::parse("peer-a").unwrap()),
             generation: Generation::new(9).unwrap(),
             revision: 3,

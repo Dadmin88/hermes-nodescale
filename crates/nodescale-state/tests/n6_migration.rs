@@ -568,7 +568,7 @@ fn populated_v8_upgrades_to_v9_with_exact_typed_backfill_and_n7_schema_identity(
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        9
+        10
     );
     let typed:(String,String,String,String,String,i64,String,String)=connection.query_row("SELECT i.identity_origin_kind,io.join_session_id,b.provenance_kind,bp.join_session_id,r.n5_provider_binding_id,r.generation,r.binding_state,z.operation_id FROM n5_device_identities i JOIN n5_n4_identity_origins io ON io.origin_id=i.n4_origin_id AND io.device_id=i.device_id AND io.network_id=i.network_id JOIN n5_provider_bindings b ON b.device_id=i.device_id AND b.network_id=i.network_id JOIN n5_n4_provider_binding_provenance bp ON bp.binding_id=b.n4_provenance_binding_id AND bp.device_id=b.device_id AND bp.network_id=b.network_id JOIN n6_binding_records r ON r.n5_provider_binding_id=b.binding_id AND r.device_id=b.device_id AND r.network_id=b.network_id JOIN n6_challenge_reservations z ON z.binding_id=r.binding_id AND z.device_id=r.device_id AND z.network_id=r.network_id AND z.generation=r.generation WHERE r.binding_id=?1",[BINDING],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).unwrap();
     assert_eq!(

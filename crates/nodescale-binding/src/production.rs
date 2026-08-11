@@ -12,8 +12,9 @@ use nodescale_keryx_adapter::{
     NodescaleIdentityControlPlane, RejectionCode,
 };
 use nodescale_state::{
-    N5ConfiguredHeadscaleProvider, N6AuthenticatedBindOutcome, N6BindingView,
-    N6ChallengeCompletion, N6ChallengeReservationOutcome, StateError, StateStore,
+    N5ConfiguredHeadscaleProvider, N5ConfiguredProvider, N5ConfiguredTailscaleProvider,
+    N6AuthenticatedBindOutcome, N6BindingView, N6ChallengeCompletion,
+    N6ChallengeReservationOutcome, StateError, StateStore,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -55,7 +56,7 @@ pub enum N6ChallengeIssueOutcome {
 
 struct StateN6Runtime {
     store: StateStore,
-    provider: N5ConfiguredHeadscaleProvider,
+    provider: N5ConfiguredProvider,
 }
 
 enum ActorCommand {
@@ -142,7 +143,25 @@ impl N6BindingService<SystemN6Clock> {
         provider: N5ConfiguredHeadscaleProvider,
         challenge_ttl: Duration,
     ) -> Result<Self, N6ProductionError> {
-        Self::with_clock(store, provider, challenge_ttl, Arc::new(SystemN6Clock))
+        Self::with_clock_configured(
+            store,
+            N5ConfiguredProvider::Headscale(provider),
+            challenge_ttl,
+            Arc::new(SystemN6Clock),
+        )
+    }
+
+    pub fn new_tailscale(
+        store: StateStore,
+        provider: N5ConfiguredTailscaleProvider,
+        challenge_ttl: Duration,
+    ) -> Result<Self, N6ProductionError> {
+        Self::with_clock_configured(
+            store,
+            N5ConfiguredProvider::Tailscale(provider),
+            challenge_ttl,
+            Arc::new(SystemN6Clock),
+        )
     }
 }
 
@@ -150,6 +169,20 @@ impl<C: N6Clock> N6BindingService<C> {
     pub fn with_clock(
         store: StateStore,
         provider: N5ConfiguredHeadscaleProvider,
+        challenge_ttl: Duration,
+        clock: Arc<C>,
+    ) -> Result<Self, N6ProductionError> {
+        Self::with_clock_configured(
+            store,
+            N5ConfiguredProvider::Headscale(provider),
+            challenge_ttl,
+            clock,
+        )
+    }
+
+    fn with_clock_configured(
+        store: StateStore,
+        provider: N5ConfiguredProvider,
         challenge_ttl: Duration,
         clock: Arc<C>,
     ) -> Result<Self, N6ProductionError> {
@@ -469,7 +502,7 @@ async fn issue_on_actor(
 ) -> Result<N6ChallengeIssueOutcome, N6ProductionError> {
     let fresh = runtime
         .store
-        .reconcile_n5_provider_binding(&runtime.provider, device_id, now, AuditActor::system())
+        .reconcile_n5_configured_provider(&runtime.provider, device_id, now, AuditActor::system())
         .await
         .map_err(classify_state_error)?;
     if !fresh.currently_trusted || fresh.network_id != network_id {
@@ -541,7 +574,7 @@ async fn confirm_on_actor(
 ) -> Result<N6AuthenticatedBindOutcome, N6ProductionError> {
     let fresh = runtime
         .store
-        .reconcile_n5_provider_binding(
+        .reconcile_n5_configured_provider(
             &runtime.provider,
             request.device_id(),
             now,
@@ -569,7 +602,7 @@ async fn rotate_on_actor(
         .map_err(classify_state_error)?;
     let fresh = runtime
         .store
-        .reconcile_n5_provider_binding(
+        .reconcile_n5_configured_provider(
             &runtime.provider,
             predecessor.device_id,
             now,
@@ -595,7 +628,7 @@ async fn authorize_on_actor(
 ) -> Result<N6BindingView, N6ProductionError> {
     let fresh = runtime
         .store
-        .reconcile_n5_provider_binding(&runtime.provider, device_id, now, AuditActor::system())
+        .reconcile_n5_configured_provider(&runtime.provider, device_id, now, AuditActor::system())
         .await
         .map_err(classify_state_error)?;
     if !fresh.currently_trusted || fresh.network_id != network_id {

@@ -33,10 +33,9 @@ fn membership_transitions_fail_closed() {
             .transition(MembershipState::Active)
             .is_err()
     );
-    assert!(
-        MembershipState::Joining
-            .transition(MembershipState::Active)
-            .is_err()
+    assert_eq!(
+        MembershipState::Joining.transition(MembershipState::Active),
+        Ok(MembershipState::Active)
     );
     assert!(
         MembershipState::Suspended
@@ -457,5 +456,22 @@ fn n4_lifecycle_is_durable_and_stops_join_progress_at_provider_credential() {
     assert_eq!(
         InvitationState::Failed.transition(InvitationState::Expiring),
         Ok(InvitationState::Expiring)
+    );
+}
+
+#[test]
+fn adoption_challenge_parser_accepts_base64url_underscores_without_widening_delimiters() {
+    let value =
+        "nsadopt1_11111111-1111-4111-8111-111111111111___________________________________________8";
+    let parsed: AdoptionChallengeToken = value.parse().unwrap();
+    assert_eq!(
+        parsed.challenge_id(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(parsed.with_encoded(str::to_owned), value);
+    assert!(
+        format!("{value}_extra")
+            .parse::<AdoptionChallengeToken>()
+            .is_err()
     );
 }

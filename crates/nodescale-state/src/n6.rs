@@ -15,7 +15,7 @@ pub struct N6BindingView {
     pub network_id: NetworkId,
     pub device_id: DeviceId,
     pub provider_binding_id: ProviderBindingId,
-    pub join_session_id: JoinSessionId,
+    pub join_session_id: Option<JoinSessionId>,
     pub verified_peer_id: Option<KeryxPeerId>,
     pub generation: Generation,
     pub revision: u64,
@@ -117,11 +117,13 @@ impl StateStore {
         now: DateTime<Utc>,
     ) -> Result<N6AuthenticatedBindOutcome, StateError> {
         self.transactional(|tx, store| {
-            let historical_join_session_id = JoinSessionId::parse(&tx.query_row(
+            let historical_join_session_id = tx.query_row(
                 "SELECT p.join_session_id FROM n5_provider_bindings b JOIN n5_n4_provider_binding_provenance p ON p.binding_id=b.n4_provenance_binding_id AND p.device_id=b.device_id AND p.network_id=b.network_id WHERE b.binding_id=?1 AND b.device_id=?2 AND b.network_id=?3",
                 params![request.provider_binding_id().to_string(), request.device_id().to_string(), request.network_id().to_string()],
                 |row| row.get::<_, String>(0),
-            )?).map_err(|error| StateError::Conflict(error.to_string()))?;
+            ).optional()?
+                .map(|value| JoinSessionId::parse(&value).map_err(|error| StateError::Conflict(error.to_string())))
+                .transpose()?;
             let fingerprint = n6_request_fingerprint(
                 &authenticated_peer_id,
                 &request,
@@ -624,11 +626,19 @@ impl StateStore {
             .validate_at(now)
             .map_err(|error| StateError::Conflict(error.to_string()))?;
         self.transactional(|tx, store| {
-            let historical_join_session_id = JoinSessionId::parse(&tx.query_row(
+            let historical_join_session_id = tx.query_row(
                 "SELECT p.join_session_id FROM n5_provider_bindings b JOIN n5_n4_provider_binding_provenance p ON p.binding_id=b.n4_provenance_binding_id AND p.device_id=b.device_id AND p.network_id=b.network_id JOIN n5_device_identities i ON i.device_id=b.device_id AND i.network_id=b.network_id WHERE b.binding_id=?1 AND b.device_id=?2 AND b.network_id=?3 AND p.identity_origin_id=i.n4_origin_id",
                 params![request.provider_binding_id().to_string(), request.device_id().to_string(), request.network_id().to_string()],
                 |row| row.get::<_, String>(0),
-            ).optional()?.ok_or_else(|| StateError::Conflict("N6 challenge requires exact confirmed N5 provider-binding provenance".into()))?).map_err(|error| StateError::Conflict(error.to_string()))?;
+            ).optional()?.map(|value| JoinSessionId::parse(&value).map_err(|error| StateError::Conflict(error.to_string()))).transpose()?;
+            if historical_join_session_id.is_none() {
+                let adopted: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM n5_provider_bindings b JOIN n5_existing_adoption_provider_binding_provenance p ON p.binding_id=b.adoption_provenance_binding_id AND p.device_id=b.device_id AND p.network_id=b.network_id JOIN n5_device_identities i ON i.device_id=b.device_id AND i.network_id=b.network_id JOIN n5_existing_adoption_identity_origins o ON o.origin_id=i.adoption_origin_id AND o.device_id=i.device_id AND o.network_id=i.network_id WHERE b.binding_id=?1 AND b.device_id=?2 AND b.network_id=?3 AND b.provenance_kind='existing_provider_adoption' AND p.identity_origin_id=o.origin_id)",
+                    params![request.provider_binding_id().to_string(), request.device_id().to_string(), request.network_id().to_string()],
+                    |row| row.get(0),
+                )?;
+                if !adopted { return Err(StateError::Conflict("N6 challenge requires exact confirmed N5 provider-binding provenance".into())); }
+            }
             let provider_binding_id = request.provider_binding_id();
             let fingerprint = n6_challenge_fingerprint(request, historical_join_session_id);
             if let Some((stored_fingerprint, state, reservation_id, binding_id, generation)) = tx
@@ -784,10 +794,10 @@ impl StateStore {
     ) -> Result<N6BindingView, StateError> {
         let row = tx.query_row(
             "SELECT r.network_id,r.device_id,r.n5_provider_binding_id,p.join_session_id,r.verified_peer_id,r.generation,r.revision,r.binding_state,r.created_at_ms,r.confirmed_at_ms,r.stale_at_ms,r.rotated_at_ms,r.revoked_at_ms \
-             FROM n6_binding_records r JOIN n5_n4_provider_binding_provenance p ON p.binding_id=r.n5_provider_binding_id \
+             FROM n6_binding_records r LEFT JOIN n5_n4_provider_binding_provenance p ON p.binding_id=r.n5_provider_binding_id \
              WHERE r.binding_id=?1",
             [binding_id.to_string()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, u64>(5)?, row.get::<_, u64>(6)?, row.get::<_, String>(7)?, row.get::<_, i64>(8)?, row.get::<_, Option<i64>>(9)?, row.get::<_, Option<i64>>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<i64>>(12)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, u64>(5)?, row.get::<_, u64>(6)?, row.get::<_, String>(7)?, row.get::<_, i64>(8)?, row.get::<_, Option<i64>>(9)?, row.get::<_, Option<i64>>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<i64>>(12)?)),
         ).optional()?.ok_or_else(|| StateError::NotFound(binding_id.to_string()))?;
         let time = |value: i64| {
             DateTime::from_timestamp_millis(value)
@@ -810,7 +820,10 @@ impl StateStore {
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
             provider_binding_id: ProviderBindingId::parse(&row.2)
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
-            join_session_id: JoinSessionId::parse(&row.3)
+            join_session_id: row
+                .3
+                .map(|value| JoinSessionId::parse(&value))
+                .transpose()
                 .map_err(|error| StateError::Conflict(error.to_string()))?,
             verified_peer_id: row
                 .4
@@ -883,16 +896,28 @@ impl StateStore {
 
 fn n6_challenge_fingerprint(
     request: &N6BindingChallengeRequest,
-    historical_join_session_id: JoinSessionId,
+    historical_join_session_id: Option<JoinSessionId>,
 ) -> String {
     let mut hasher = Sha256::new();
+    let network_id = request.network_id().to_string();
+    let device_id = request.device_id().to_string();
+    let generation = request.generation().get().to_string();
+    let expires_at = request.expires_at().timestamp_millis().to_string();
+    let provenance = historical_join_session_id
+        .map(|join_session_id| join_session_id.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "existing_provider_adoption:{}",
+                request.provider_binding_id()
+            )
+        });
     for value in [
         request.expected_authenticated_peer_id().as_str(),
-        &request.network_id().to_string(),
-        &request.device_id().to_string(),
-        &historical_join_session_id.to_string(),
-        &request.generation().get().to_string(),
-        &request.expires_at().timestamp_millis().to_string(),
+        &network_id,
+        &device_id,
+        &provenance,
+        &generation,
+        &expires_at,
         request.agent_version().as_str(),
     ] {
         hasher.update((value.len() as u64).to_be_bytes());
@@ -904,16 +929,27 @@ fn n6_challenge_fingerprint(
 fn n6_request_fingerprint(
     peer: &KeryxPeerId,
     request: &N6AuthenticatedBindRequest,
-    historical_join_session_id: JoinSessionId,
+    historical_join_session_id: Option<JoinSessionId>,
 ) -> String {
     let mut hasher = Sha256::new();
+    let network_id = request.network_id().to_string();
+    let device_id = request.device_id().to_string();
+    let generation = request.generation().get().to_string();
+    let provenance = historical_join_session_id
+        .map(|join_session_id| join_session_id.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "existing_provider_adoption:{}",
+                request.provider_binding_id()
+            )
+        });
     for value in [
         peer.as_str(),
         request.operation_id().as_str(),
-        &request.network_id().to_string(),
-        &request.device_id().to_string(),
-        &historical_join_session_id.to_string(),
-        &request.generation().get().to_string(),
+        &network_id,
+        &device_id,
+        &provenance,
+        &generation,
         request.agent_version().as_str(),
     ] {
         hasher.update((value.len() as u64).to_be_bytes());

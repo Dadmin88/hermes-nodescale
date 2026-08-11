@@ -2605,9 +2605,15 @@ name = "nodescale-runtime"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "keryx-proto",
+ "keryx-relay",
  "libc",
  "nix",
+ "nodescale-binding",
  "nodescale-domain",
+ "nodescale-fleet-client",
+ "nodescale-keryx-adapter",
+ "nodescale-projection",
  "nodescale-provider",
  "nodescale-provider-fake",
  "nodescale-provider-headscale",
@@ -2620,6 +2626,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml",
+ "tonic",
 ]
 
 [[package]]
@@ -2632,6 +2639,7 @@ dependencies = [
  "nodescale-provider",
  "nodescale-provider-fake",
  "nodescale-provider-headscale",
+ "nodescale-provider-tailscale",
  "rusqlite",
  "serde",
  "serde_json",
