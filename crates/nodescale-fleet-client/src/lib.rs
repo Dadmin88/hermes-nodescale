@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -81,13 +81,52 @@ pub enum ApplyOperation {
 }
 
 /// The exact local-control provenance object accepted by Fleet's UDS parser.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provenance {
     pub source: ProjectionSource,
     pub network_id: String,
     pub device_id: String,
     pub snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authenticated_peer_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireProvenance {
+    source: ProjectionSource,
+    network_id: String,
+    device_id: String,
+    snapshot: String,
+    #[serde(default)]
+    binding_id: Option<String>,
+    #[serde(default)]
+    authenticated_peer_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Provenance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WireProvenance::deserialize(deserializer)?;
+        if wire.binding_id.is_some() != wire.authenticated_peer_id.is_some() {
+            return Err(D::Error::custom(
+                "authenticated provenance requires binding_id and authenticated_peer_id together",
+            ));
+        }
+        Ok(Self {
+            source: wire.source,
+            network_id: wire.network_id,
+            device_id: wire.device_id,
+            snapshot: wire.snapshot,
+            binding_id: wire.binding_id,
+            authenticated_peer_id: wire.authenticated_peer_id,
+        })
+    }
 }
 
 impl Provenance {
@@ -102,7 +141,37 @@ impl Provenance {
             network_id: network_id.into(),
             device_id: device_id.into(),
             snapshot: snapshot.into(),
+            binding_id: None,
+            authenticated_peer_id: None,
         }
+    }
+
+    #[must_use]
+    pub fn authenticated(
+        network_id: impl Into<String>,
+        device_id: impl Into<String>,
+        snapshot: impl Into<String>,
+        binding_id: impl Into<String>,
+        authenticated_peer_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: ProjectionSource::Nodescale,
+            network_id: network_id.into(),
+            device_id: device_id.into(),
+            snapshot: snapshot.into(),
+            binding_id: Some(binding_id.into()),
+            authenticated_peer_id: Some(authenticated_peer_id.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn binding_id(&self) -> Option<&str> {
+        self.binding_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn authenticated_peer_id(&self) -> Option<&str> {
+        self.authenticated_peer_id.as_deref()
     }
 }
 

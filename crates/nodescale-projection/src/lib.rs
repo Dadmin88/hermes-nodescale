@@ -447,10 +447,15 @@ pub mod production {
                 .iter()
                 .map(generated_operation)
                 .collect(),
-            Provenance::new(
+            Provenance::authenticated(
                 desired.network_id().to_string(),
                 desired.device_id().to_string(),
                 desired.projection_generation().get().to_string(),
+                desired.binding_provenance().binding_id().to_string(),
+                desired
+                    .binding_provenance()
+                    .authenticated_peer_id()
+                    .as_str(),
             ),
         )
     }
