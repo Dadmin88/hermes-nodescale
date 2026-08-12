@@ -1752,7 +1752,22 @@ impl StateStore {
                 "N5 provider reconciliation used the wrong provider instance".into(),
             ));
         }
-        let observed = match provider.get_node(provider_identity).await {
+        let observed = match &binding {
+            ReconciliationBinding::Join(_) => provider.get_node(provider_identity).await,
+            ReconciliationBinding::Adoption { .. } => provider.list_nodes().await.map(|nodes| {
+                let mut exact_identity = nodes.into_iter().filter(|node| {
+                    node.identity.provider_instance_id == provider_identity.provider_instance_id
+                        && node.identity.node_id == provider_identity.node_id
+                });
+                let observed = exact_identity.next();
+                if exact_identity.next().is_some() {
+                    None
+                } else {
+                    observed
+                }
+            }),
+        };
+        let observed = match observed {
             Ok(observed) => observed,
             Err(error) => {
                 if binding_state == ProviderBindingState::Active {
@@ -1832,7 +1847,20 @@ fn adopted_provider_node_remains_exact(
     node_key_fingerprint: &str,
     now: DateTime<Utc>,
 ) -> bool {
-    provider_node_identity_remains_exact(node, provider_identity, now)
+    node.identity.provider_instance_id == provider_identity.provider_instance_id
+        && node.identity.node_id == provider_identity.node_id
+        && node.expires_at.is_none_or(|expires_at| expires_at > now)
+        && !node.expired
+        && node
+            .identity_evidence
+            .machine_key
+            .as_ref()
+            .is_some_and(|machine_key| {
+                format!(
+                    "sha256:{:x}",
+                    Sha256::digest(machine_key.as_str().as_bytes())
+                ) == provider_identity.stable_key_fingerprint
+            })
         && node
             .identity_evidence
             .node_key
