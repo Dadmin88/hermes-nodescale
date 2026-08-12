@@ -1421,6 +1421,36 @@ impl StateStore {
         })
     }
 
+    fn reactivate_exact_n5_provider_binding(
+        &self,
+        device_id: DeviceId,
+        expected_revision: Generation,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<DeviceTrustView, StateError> {
+        validate_n5_audit_actor(&actor)?;
+        self.transactional(|tx, store| {
+            if store.fail_before_audit.get() {
+                return Err(StateError::InjectedFailure);
+            }
+            let changed = tx.execute(
+                "UPDATE n5_provider_bindings SET binding_state='active',binding_revision=binding_revision+1,observed_at_ms=?3,stale_at_ms=NULL,last_transition_audit_event_id=?4,transition_actor_source=?5,transition_actor_id=?6 WHERE device_id=?1 AND binding_state='stale' AND binding_revision=?2",
+                params![device_id.to_string(), expected_revision.get(), now.timestamp_millis(), AuditEventId::new().to_string(), actor.source, actor.actor_id],
+            )?;
+            if changed != 1 {
+                return Err(StateError::StaleGeneration {
+                    expected: expected_revision.get(),
+                    actual: tx.query_row(
+                        "SELECT binding_revision FROM n5_provider_bindings WHERE device_id=?1 ORDER BY binding_revision DESC LIMIT 1",
+                        [device_id.to_string()],
+                        |row| row.get(0),
+                    )?,
+                });
+            }
+            load_device_trust_view(tx, device_id)
+        })
+    }
+
     pub fn mark_n5_provider_binding_cleanup_pending(
         &self,
         device_id: DeviceId,
@@ -1577,7 +1607,20 @@ impl StateStore {
         }
     }
 
-    pub(crate) async fn reconcile_n5_provider_binding_from_provider<P: ReadOnlyProvider>(
+    pub async fn reconcile_n5_provider_binding_from_runtime(
+        &self,
+        provider: &dyn ReadOnlyProvider,
+        device_id: DeviceId,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<DeviceTrustView, StateError> {
+        self.reconcile_n5_provider_binding_from_provider(provider, device_id, now, actor)
+            .await
+    }
+
+    pub(crate) async fn reconcile_n5_provider_binding_from_provider<
+        P: ReadOnlyProvider + ?Sized,
+    >(
         &self,
         provider: &P,
         device_id: DeviceId,
@@ -1591,6 +1634,7 @@ impl StateStore {
             Adoption {
                 provider_identity: nodescale_domain::ProviderIdentity,
                 binding_revision: Generation,
+                binding_state: ProviderBindingState,
                 node_key_fingerprint: String,
             },
         }
@@ -1598,7 +1642,7 @@ impl StateStore {
             .connection
             .borrow()
             .query_row(
-                "SELECT provenance_kind FROM n5_provider_bindings WHERE device_id=?1 AND binding_state='active'",
+                "SELECT provenance_kind FROM n5_provider_bindings WHERE device_id=?1 AND binding_state IN ('active','stale')",
                 [device_id.to_string()],
                 |row| row.get(0),
             )
@@ -1608,7 +1652,12 @@ impl StateStore {
             Some("n4_join_session") => Some(ReconciliationBinding::Join(
                 view.provider_binding
                     .as_ref()
-                    .filter(|binding| binding.binding_state == ProviderBindingState::Active)
+                    .filter(|binding| {
+                        matches!(
+                            binding.binding_state,
+                            ProviderBindingState::Active | ProviderBindingState::Stale
+                        )
+                    })
                     .cloned()
                     .ok_or_else(|| {
                         StateError::Conflict(
@@ -1617,11 +1666,11 @@ impl StateStore {
                     })?,
             )),
             Some("existing_provider_adoption") => {
-                type AdoptionBindingRow = (String, String, String, u64, String);
+                type AdoptionBindingRow = (String, String, String, u64, String, String);
                 self.connection
                     .borrow()
                     .query_row(
-                        "SELECT b.provider_instance_id,b.provider_node_id,b.machine_key_fingerprint,b.binding_revision,p.node_key_fingerprint \
+                        "SELECT b.provider_instance_id,b.provider_node_id,b.machine_key_fingerprint,b.binding_revision,p.node_key_fingerprint,b.binding_state \
                          FROM n5_provider_bindings b \
                          JOIN n5_existing_adoption_provider_binding_provenance p \
                            ON p.binding_id=b.adoption_provenance_binding_id \
@@ -1630,7 +1679,7 @@ impl StateStore {
                           AND p.provider_node_id=b.provider_node_id \
                           AND p.machine_key_fingerprint=b.machine_key_fingerprint \
                          WHERE b.device_id=?1 AND b.provenance_kind='existing_provider_adoption' \
-                           AND b.binding_state='active'",
+                           AND b.binding_state IN ('active','stale')",
                         [device_id.to_string()],
                         |row| {
                             Ok((
@@ -1639,6 +1688,7 @@ impl StateStore {
                                 row.get(2)?,
                                 row.get(3)?,
                                 row.get(4)?,
+                                row.get(5)?,
                             ))
                         },
                     )
@@ -1657,6 +1707,15 @@ impl StateStore {
                                 )
                                 .map_err(|error| StateError::Conflict(error.to_string()))?,
                                 binding_revision: generation(row.3)?,
+                                binding_state: match row.5.as_str() {
+                                    "active" => ProviderBindingState::Active,
+                                    "stale" => ProviderBindingState::Stale,
+                                    _ => {
+                                        return Err(StateError::Conflict(
+                                            "unsupported N5 provider binding state".into(),
+                                        ));
+                                    }
+                                },
                                 node_key_fingerprint: row.4,
                             })
                         },
@@ -1684,6 +1743,10 @@ impl StateStore {
                 binding_revision, ..
             } => *binding_revision,
         };
+        let binding_state = match &binding {
+            ReconciliationBinding::Join(binding) => binding.binding_state,
+            ReconciliationBinding::Adoption { binding_state, .. } => *binding_state,
+        };
         if provider.instance_id() != provider_identity.provider_instance_id {
             return Err(StateError::Conflict(
                 "N5 provider reconciliation used the wrong provider instance".into(),
@@ -1692,7 +1755,9 @@ impl StateStore {
         let observed = match provider.get_node(provider_identity).await {
             Ok(observed) => observed,
             Err(error) => {
-                self.mark_n5_provider_binding_stale(device_id, binding_revision, now, actor)?;
+                if binding_state == ProviderBindingState::Active {
+                    self.mark_n5_provider_binding_stale(device_id, binding_revision, now, actor)?;
+                }
                 return Err(StateError::Conflict(format!(
                     "N5 provider reconciliation failed and binding was staled: {error}"
                 )));
@@ -1718,10 +1783,24 @@ impl StateStore {
             ),
         });
         if remains_exact {
+            if binding_state == ProviderBindingState::Stale {
+                let mut reactivated = self.reactivate_exact_n5_provider_binding(
+                    device_id,
+                    binding_revision,
+                    now,
+                    actor,
+                )?;
+                reactivated.currently_trusted =
+                    reactivated.trust_state == DeviceTrustState::Trusted;
+                return Ok(reactivated);
+            }
             let mut provider_fresh_view = view;
             provider_fresh_view.currently_trusted =
                 provider_fresh_view.trust_state == DeviceTrustState::Trusted;
             return Ok(provider_fresh_view);
+        }
+        if binding_state == ProviderBindingState::Stale {
+            return Ok(view);
         }
         self.mark_n5_provider_binding_stale(device_id, binding_revision, now, actor)
     }

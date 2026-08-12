@@ -378,6 +378,44 @@ pub struct CycleOutcome {
     pub observed_nodes: u64,
 }
 
+pub async fn run_observation_and_n5_reconciliation(
+    store: &StateStore,
+    network_id: NetworkId,
+    provider: &dyn ReadOnlyProvider,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), RuntimeError> {
+    store
+        .reconcile_read_only(network_id, provider, now, AuditActor::system())
+        .await
+        .map_err(|_| RuntimeError::Reconciliation)?;
+
+    let mut after = None;
+    loop {
+        let devices =
+            store.operator_device_page(network_id, after, nodescale_state::DEVICE_PAGE_MAX)?;
+        if devices.is_empty() {
+            break;
+        }
+        for device in &devices {
+            if store.durable_device_trust(device.device_id)?.is_some() {
+                store
+                    .reconcile_n5_provider_binding_from_runtime(
+                        provider,
+                        device.device_id,
+                        now,
+                        AuditActor::system(),
+                    )
+                    .await?;
+            }
+        }
+        if devices.len() < nodescale_state::DEVICE_PAGE_MAX {
+            break;
+        }
+        after = devices.last().map(|device| device.device_id);
+    }
+    Ok(())
+}
+
 pub async fn run_cycle(
     store: &StateStore,
     config: &RuntimeConfig,
@@ -395,15 +433,13 @@ pub async fn run_cycle(
                     "persisted network provider identity does not match config",
                 ));
             }
-            store
-                .reconcile_read_only(
-                    network_id,
-                    provider.provider(),
-                    Utc::now(),
-                    AuditActor::system(),
-                )
-                .await
-                .map_err(|_| RuntimeError::Reconciliation)?;
+            run_observation_and_n5_reconciliation(
+                store,
+                network_id,
+                provider.provider(),
+                Utc::now(),
+            )
+            .await?;
             false
         }
         Err(StateError::NotFound(_)) => {

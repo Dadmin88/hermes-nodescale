@@ -32,7 +32,7 @@ pub use n7::*;
 #[cfg(test)]
 mod n5_identity_trust_tests;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 10;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 11;
 pub const DEVICE_PAGE_MAX: usize = 32;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const DISCOVERY_MIGRATION: &str = include_str!("../migrations/0002_discovery_reconciliation.sql");
@@ -50,6 +50,8 @@ const TYPED_N5_PROVENANCE_MIGRATION: &str =
     include_str!("../migrations/0009_typed_n5_provenance.sql");
 const EXISTING_PROVIDER_ADOPTION_ACTIVATION_MIGRATION: &str =
     include_str!("../migrations/0010_existing_provider_adoption_activation.sql");
+const EXACT_PROVIDER_REVALIDATION_MIGRATION: &str =
+    include_str!("../migrations/0011_exact_provider_revalidation.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
@@ -977,6 +979,7 @@ impl StateStore {
                 EXISTING_DEVICE_ADOPTION_STATE_MIGRATION,
                 TYPED_N5_PROVENANCE_MIGRATION,
                 EXISTING_PROVIDER_ADOPTION_ACTIVATION_MIGRATION,
+                EXACT_PROVIDER_REVALIDATION_MIGRATION,
             ];
             for migration in migrations.iter().skip(found as usize) {
                 connection.execute_batch(migration)?;

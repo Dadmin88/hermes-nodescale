@@ -352,7 +352,9 @@ transition_enum!(
             ProviderBindingState::Stale | ProviderBindingState::CleanupPending
         ) | (
             ProviderBindingState::Stale,
-            ProviderBindingState::CleanupPending | ProviderBindingState::Removed
+            ProviderBindingState::Active
+                | ProviderBindingState::CleanupPending
+                | ProviderBindingState::Removed
         ) | (
             ProviderBindingState::CleanupPending,
             ProviderBindingState::Removed

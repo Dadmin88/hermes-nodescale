@@ -2604,6 +2604,7 @@ dependencies = [
 name = "nodescale-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "keryx-proto",
  "keryx-relay",
@@ -2619,6 +2620,7 @@ dependencies = [
  "nodescale-provider-headscale",
  "nodescale-provider-tailscale",
  "nodescale-state",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
