@@ -47,7 +47,7 @@ fn n7_schema(connection: &Connection) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn v8_opens_through_v10_without_rewriting_n7_schema_or_allowing_partial_adoption_rows() {
+fn v8_opens_through_v11_without_rewriting_n7_schema_or_allowing_partial_adoption_rows() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("v9-typed-provenance.db");
     let connection = Connection::open(&path).unwrap();
@@ -64,8 +64,8 @@ fn v8_opens_through_v10_without_rewriting_n7_schema_or_allowing_partial_adoption
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 10);
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 11);
+    assert_eq!(store.schema_version().unwrap(), 11);
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
@@ -199,7 +199,7 @@ fn two_v8_openers_serialize_one_v9_migration() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let store = StateStore::open(path).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 10);
+            assert_eq!(store.schema_version().unwrap(), 11);
         }));
     }
     barrier.wait();
@@ -303,7 +303,7 @@ fn v9_transaction_rollback_and_failed_open_leave_exact_v8_and_no_temp_residue() 
         .unwrap();
     drop(connection);
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
 }
 
 #[test]
@@ -359,7 +359,7 @@ fn process_crash_before_v9_marker_restores_exact_v8_and_retry_succeeds() {
     drop(connection);
 
     let store = StateStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     drop(store);
     let connection = Connection::open(path).unwrap();
     assert_eq!(

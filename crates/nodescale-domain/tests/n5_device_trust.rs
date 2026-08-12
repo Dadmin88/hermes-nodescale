@@ -35,7 +35,7 @@ fn device_trust_is_explicit_and_revocation_is_terminal() {
 }
 
 #[test]
-fn provider_binding_lifecycle_never_reactivates_stale_identity() {
+fn provider_binding_lifecycle_allows_exact_stale_revalidation_but_not_removed_identity() {
     assert_eq!(
         ProviderBindingState::Active
             .transition(ProviderBindingState::Stale)
@@ -60,10 +60,11 @@ fn provider_binding_lifecycle_never_reactivates_stale_identity() {
             .unwrap(),
         ProviderBindingState::Removed
     );
-    assert!(
+    assert_eq!(
         ProviderBindingState::Stale
             .transition(ProviderBindingState::Active)
-            .is_err()
+            .unwrap(),
+        ProviderBindingState::Active
     );
     assert!(
         ProviderBindingState::Removed
