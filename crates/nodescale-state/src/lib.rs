@@ -55,6 +55,7 @@ const EXISTING_PROVIDER_ADOPTION_ACTIVATION_MIGRATION: &str =
 pub enum Failpoint {
     BeforeAuditInsert,
     BeforeN4ConfirmationAudit,
+    BeforeAdoptionExpiryCommit,
 }
 
 #[derive(Debug, Error)]
@@ -781,6 +782,7 @@ pub struct StateStore {
     connection: RefCell<Connection>,
     fail_before_audit: Cell<bool>,
     fail_before_n4_confirmation_audit: Cell<bool>,
+    fail_before_adoption_expiry_commit: Cell<bool>,
 }
 
 fn migration_query_digest(
@@ -1027,6 +1029,7 @@ impl StateStore {
             connection: RefCell::new(connection),
             fail_before_audit: Cell::new(false),
             fail_before_n4_confirmation_audit: Cell::new(false),
+            fail_before_adoption_expiry_commit: Cell::new(false),
         })
     }
 
@@ -1049,6 +1052,9 @@ impl StateStore {
             Failpoint::BeforeAuditInsert => self.fail_before_audit.set(enabled),
             Failpoint::BeforeN4ConfirmationAudit => {
                 self.fail_before_n4_confirmation_audit.set(enabled);
+            }
+            Failpoint::BeforeAdoptionExpiryCommit => {
+                self.fail_before_adoption_expiry_commit.set(enabled);
             }
         }
     }

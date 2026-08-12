@@ -84,6 +84,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 })
             );
         }
+        "expire-adoption" => {
+            let root = private_token(&PathBuf::from(value(&args, "--root-token-file")?))?;
+            let action_id = value(&args, "--action-id")?;
+            let expired = store.expire_existing_provider_adoption(&root, &action_id, Utc::now())?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "action_id": expired.action_id,
+                    "action_state": expired.action_state,
+                    "provider_node_id": expired.provider_node_id,
+                    "observation_adoption_state": expired.observation_adoption_state,
+                })
+            );
+        }
         "trust" => {
             let root = private_token(&PathBuf::from(value(&args, "--root-token-file")?))?;
             let authority_id = TrustAuthorityId::parse(&value(&args, "--authority-id")?)?;

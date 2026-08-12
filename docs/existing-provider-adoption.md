@@ -45,6 +45,17 @@ The target payload is one newline-terminated JSON object:
 
 The owner token file must be a regular owner-only file. The provider token remains a `secret://systemd/...` credential reference; neither token belongs in arguments, logs, source, or the database.
 
+Before issuing an action, run the challenge-free transport preflight with an explicit operator-approved SSH destination. The destination is not stored in runtime configuration or defaulted by Nodescale. The target must have the matching `nodescale-adoption-target` binary installed on `PATH`:
+
+```text
+nodescale-adopt-preflight \
+  --provider-node-id <Tailscale stable node ID> \
+  --listen <controller Tailscale IP:port> \
+  --ssh-destination <operator-approved OpenSSH destination>
+```
+
+The controller invokes a fixed `nodescale-adoption-target preflight` command through OpenSSH. Bounded JSON travels only over SSH stdin; no inline shell script, challenge, node key, token, username, or machine alias is embedded in source or command arguments. The preflight creates no adoption or authority rows and carries no challenge.
+
 ## One-shot commands
 
 Bootstrap the existing N5 owner root and authority exactly once:
@@ -63,8 +74,20 @@ nodescale-adopt \
   --provider-node-id <Tailscale stable node ID> \
   --authorization-operation-id <unique operation ID> \
   --proof-operation-id <unique operation ID> \
-  --listen <controller Tailscale IP:port>
+  --listen <controller Tailscale IP:port> \
+  --ssh-destination <operator-approved OpenSSH destination>
 ```
+
+If an issued action is stranded and has naturally expired, terminalize that exact action through the owner boundary:
+
+```text
+nodescale-owner expire-adoption \
+  --config <absolute-runtime.toml> \
+  --root-token-file <owner-only-token-file> \
+  --action-id <expired action UUID>
+```
+
+This succeeds only for an unchanged, unbound observation with no pending proof operation or resulting identity. It records the immutable expiry decision/audit and restores only that observation to `unmanaged`; it creates no device, trust, binding, projection, or Fleet authority.
 
 After successful adoption, explicitly activate trust:
 

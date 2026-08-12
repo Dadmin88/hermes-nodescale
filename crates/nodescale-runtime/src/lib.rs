@@ -22,8 +22,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     time::Duration,
 };
 use thiserror::Error;
@@ -79,10 +80,76 @@ pub enum RuntimeError {
     CredentialUnavailable,
     #[error("provider construction failed")]
     ProviderConstruction,
+    #[error("target transport could not be launched")]
+    TargetTransportLaunch,
+    #[error("target transport payload could not be delivered")]
+    TargetTransportDelivery,
     #[error("provider reconciliation failed")]
     Reconciliation,
     #[error(transparent)]
     State(#[from] StateError),
+}
+
+pub fn ssh_arguments(destination: &str, mode: &str) -> [String; 6] {
+    [
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "--".into(),
+        destination.into(),
+        "nodescale-adoption-target".into(),
+        mode.into(),
+    ]
+}
+
+pub fn launch_adoption_target(
+    destination: &str,
+    mode: &str,
+    payload: &[u8],
+) -> Result<Child, RuntimeError> {
+    if destination.is_empty()
+        || destination.starts_with('-')
+        || destination.chars().any(char::is_whitespace)
+    {
+        return Err(RuntimeError::Configuration("ssh destination is invalid"));
+    }
+    if !matches!(mode, "preflight" | "proof") {
+        return Err(RuntimeError::Configuration("target helper mode is invalid"));
+    }
+    let mut child = Command::new("ssh")
+        .args(ssh_arguments(destination, mode))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|_| RuntimeError::TargetTransportLaunch)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or(RuntimeError::TargetTransportLaunch)?;
+    stdin
+        .write_all(payload)
+        .map_err(|_| RuntimeError::TargetTransportDelivery)?;
+    drop(stdin);
+    Ok(child)
+}
+
+pub fn target_transport_exited_before_connect(status: Option<std::process::ExitStatus>) -> bool {
+    status.is_some()
+}
+
+#[cfg(test)]
+mod target_transport_tests {
+    use super::target_transport_exited_before_connect;
+    use std::process::Command;
+
+    #[test]
+    fn any_child_exit_before_callback_is_terminal() {
+        let success = Command::new("true").status().unwrap();
+        let failure = Command::new("false").status().unwrap();
+        assert!(target_transport_exited_before_connect(Some(success)));
+        assert!(target_transport_exited_before_connect(Some(failure)));
+        assert!(!target_transport_exited_before_connect(None));
+    }
 }
 
 impl RuntimeConfig {
