@@ -86,12 +86,13 @@ impl ReadOnlyProvider for TailscaleFixture {
 }
 
 fn adopted_node(instance: ProviderInstanceId) -> ProviderNode {
+    let provider_node_id = "n292kg92CNTRL";
     let machine_key = "mkey:adoptable-machine";
     ProviderNode {
         identity: ProviderIdentity::new(
             instance,
-            ProviderNodeId::parse("n292kg92CNTRL").unwrap(),
-            format!("sha256:{:x}", Sha256::digest(machine_key.as_bytes())),
+            ProviderNodeId::parse(provider_node_id).unwrap(),
+            format!("sha256:{:x}", Sha256::digest(provider_node_id.as_bytes())),
         )
         .unwrap(),
         identity_evidence: ProviderIdentityEvidence {
@@ -321,6 +322,98 @@ async fn runtime_cycle_does_not_reactivate_mismatched_provider_evidence() {
     assert_eq!(
         store.device(device_id).unwrap().membership_state,
         MembershipState::Active
+    );
+    assert_eq!(authority_counts(&path), (1, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn runtime_cycle_does_not_reactivate_mismatched_machine_key_evidence() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (store, network, mut provider, device_id, binding_id) = adopted_stale_fixture(&path).await;
+    provider.nodes[0].identity_evidence.machine_key =
+        Some(ConditionalIdentityEvidence::new("mkey:mismatched").unwrap());
+
+    run_observation_and_n5_reconciliation(
+        &store,
+        network.network_id,
+        &provider,
+        now() + Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(binding_state(&path), (binding_id, "stale".into(), 2));
+    assert_eq!(
+        store
+            .durable_device_trust(device_id)
+            .unwrap()
+            .unwrap()
+            .trust_state,
+        DeviceTrustState::Trusted
+    );
+    assert_eq!(authority_counts(&path), (1, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn runtime_cycle_does_not_reactivate_mismatched_provider_node_id() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (store, network, mut provider, device_id, binding_id) = adopted_stale_fixture(&path).await;
+    provider.nodes[0].identity = ProviderIdentity::new(
+        provider.instance,
+        ProviderNodeId::parse("different-node").unwrap(),
+        format!("sha256:{:x}", Sha256::digest(b"different-node")),
+    )
+    .unwrap();
+
+    run_observation_and_n5_reconciliation(
+        &store,
+        network.network_id,
+        &provider,
+        now() + Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(binding_state(&path), (binding_id, "stale".into(), 2));
+    assert_eq!(
+        store
+            .durable_device_trust(device_id)
+            .unwrap()
+            .unwrap()
+            .trust_state,
+        DeviceTrustState::Trusted
+    );
+    assert_eq!(authority_counts(&path), (1, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn runtime_cycle_rejects_mismatched_provider_instance_and_leaves_binding_stale() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (store, network, mut provider, device_id, binding_id) = adopted_stale_fixture(&path).await;
+    provider.instance = ProviderInstanceId::new();
+
+    assert!(
+        run_observation_and_n5_reconciliation(
+            &store,
+            network.network_id,
+            &provider,
+            now() + Duration::seconds(3),
+        )
+        .await
+        .is_err()
+    );
+
+    assert_eq!(binding_state(&path), (binding_id, "stale".into(), 2));
+    assert_eq!(
+        store
+            .durable_device_trust(device_id)
+            .unwrap()
+            .unwrap()
+            .trust_state,
+        DeviceTrustState::Trusted
     );
     assert_eq!(authority_counts(&path), (1, 1, 0, 0));
 }
