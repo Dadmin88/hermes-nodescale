@@ -256,6 +256,14 @@ pub struct ExistingProviderAdoptionConfirmation {
     pub receipt_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExistingProviderAdoptionExpiry {
+    pub action_id: String,
+    pub action_state: String,
+    pub provider_node_id: String,
+    pub observation_adoption_state: String,
+}
+
 impl StateStore {
     #[allow(clippy::too_many_arguments)]
     pub fn issue_existing_provider_adoption(
@@ -297,6 +305,85 @@ impl StateStore {
             tx.execute("UPDATE n5_adoption_authorization_operations SET operation_state='settled',outcome='issued',action_id=?2,receipt_id=?3,settled_at_ms=?4 WHERE operation_id=?1", params![operation_id,action_id,format!("authorization:{action_id}"),now.timestamp_millis()])?;
             tx.execute("INSERT INTO n5_adoption_actions (action_id,authorization_operation_id,authority_id,authority_generation,network_id,observation_id,provider_kind,provider_instance_id,provider_node_id,expected_observation_generation,expected_observation_fingerprint,expected_semantic_fingerprint,expected_machine_key_fingerprint,expected_node_key_fingerprint,proof_method,proof_generation,challenge_id,challenge_verifier,principal_source,principal_id,issued_at_ms,not_before_ms,expires_at_ms,action_state,terminal_decision_id,terminal_at_ms,terminal_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'tailscale_whois_provider_v1',1,?15,?16,?17,?18,?19,?19,?20,'proof_pending',NULL,NULL,NULL)", params![action_id,operation_id,authority_id.to_string(),authority_generation,network_id.to_string(),row.0,row.6,row.1,provider_node_id,row.3,row.2,row.4,machine_fingerprint,node_fingerprint,challenge_id,verifier.as_str(),actor.source,actor.actor_id,now.timestamp_millis(),expires_at.timestamp_millis()])?;
             Ok(ExistingProviderAdoptionAction { action_id, network_id, provider_node_id: provider_node_id.to_owned(), expected_observation_generation: row.3, challenge })
+        })
+    }
+
+    pub fn expire_existing_provider_adoption(
+        &self,
+        root_token: &OwnerTrustRootToken,
+        action_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ExistingProviderAdoptionExpiry, StateError> {
+        if uuid::Uuid::parse_str(action_id).is_err() {
+            return Err(StateError::Conflict("invalid adoption action id".into()));
+        }
+        self.transactional(|tx, store| {
+            type ActionRow = (String, String, String, String, u64, String, String, u64, i64, String, u64);
+            let action = tx
+                .query_row(
+                    "SELECT network_id,observation_id,provider_instance_id,provider_node_id,expected_observation_generation,expected_observation_fingerprint,expected_semantic_fingerprint,proof_generation,expires_at_ms,authority_id,authority_generation FROM n5_adoption_actions WHERE action_id=?1 AND action_state='proof_pending'",
+                    [action_id],
+                    |row| -> rusqlite::Result<ActionRow> { Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?)) },
+                )
+                .optional()?
+                .ok_or_else(|| StateError::Conflict("adoption action is not pending".into()))?;
+            if now.timestamp_millis() < action.8 {
+                return Err(StateError::Conflict("adoption action has not expired".into()));
+            }
+            let network_id = NetworkId::parse(&action.0)
+                .map_err(|error| StateError::Conflict(error.to_string()))?;
+            let actor = verify_n5_owner_root(tx, root_token, network_id)?;
+            let blocked: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM n5_adoption_proof_operations WHERE action_id=?1 AND (operation_state='pending' OR resulting_device_id IS NOT NULL OR resulting_provider_binding_id IS NOT NULL)) OR EXISTS(SELECT 1 FROM n5_existing_adoption_identity_origins WHERE action_id=?1)",
+                [action_id],
+                |row| row.get(0),
+            )?;
+            if blocked {
+                return Err(StateError::Conflict(
+                    "adoption action has proof or resulting authority".into(),
+                ));
+            }
+            let observation_state: String = tx
+                .query_row(
+                    "SELECT adoption_state FROM provider_observations WHERE observation_id=?1 AND network_id=?2 AND provider_instance_id=?3 AND provider_node_id=?4 AND semantic_generation=?5 AND stable_key_fingerprint=?6 AND semantic_fingerprint=?7 AND device_id IS NULL AND adoption_state='pending_device_credential_proof'",
+                    params![action.1,action.0,action.2,action.3,action.4,action.5,action.6],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| StateError::Conflict("adoption observation changed".into()))?;
+            let decision_id = uuid::Uuid::new_v4().to_string();
+            let audit_event_id = AuditEventId::new().to_string();
+            let safe_correlation_digest = format!(
+                "sha256:{:x}",
+                Sha256::digest(format!("expire|{action_id}").as_bytes())
+            );
+            tx.execute(
+                "INSERT INTO audit_events (event_id,timestamp,network_id,device_id,actor_source,actor_id,event_kind,outcome,generation,metadata_json) VALUES (?1,?2,?3,NULL,?4,?5,'device.adoption_action_expired','success',?6,'{}')",
+                params![audit_event_id,now.to_rfc3339(),action.0,actor.source,actor.actor_id,action.4],
+            )?;
+            tx.execute(
+                "INSERT INTO n5_adoption_decisions (decision_id,action_id,proof_operation_id,audit_event_id,decision_kind,prior_action_state,new_action_state,authority_id,authority_generation,network_id,provider_instance_id,provider_node_id,observation_generation,proof_generation,evidence_id,device_id,provider_binding_id,safe_correlation_digest,reason_code,decided_at_ms) VALUES (?1,?2,NULL,?3,'expire','proof_pending','expired',?4,?5,?6,?7,?8,?9,?10,NULL,NULL,NULL,?11,'action_expired',?12)",
+                params![decision_id,action_id,audit_event_id,action.9,action.10,action.0,action.2,action.3,action.4,action.7,safe_correlation_digest,now.timestamp_millis()],
+            )?;
+            let changed = tx.execute(
+                "UPDATE provider_observations SET adoption_state='unmanaged' WHERE observation_id=?1 AND network_id=?2 AND provider_instance_id=?3 AND provider_node_id=?4 AND semantic_generation=?5 AND stable_key_fingerprint=?6 AND semantic_fingerprint=?7 AND device_id IS NULL AND adoption_state='pending_device_credential_proof'",
+                params![action.1,action.0,action.2,action.3,action.4,action.5,action.6],
+            )?;
+            if changed != 1 {
+                return Err(StateError::Conflict(
+                    "expiry did not re-arm exactly one observation".into(),
+                ));
+            }
+            if store.fail_before_adoption_expiry_commit.get() {
+                return Err(StateError::InjectedFailure);
+            }
+            debug_assert_eq!(observation_state, "pending_device_credential_proof");
+            Ok(ExistingProviderAdoptionExpiry {
+                action_id: action_id.to_owned(),
+                action_state: "expired".into(),
+                provider_node_id: action.3,
+                observation_adoption_state: "unmanaged".into(),
+            })
         })
     }
 

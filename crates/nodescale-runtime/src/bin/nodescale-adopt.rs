@@ -2,7 +2,10 @@ use chrono::Utc;
 use nodescale_domain::{
     AdoptionChallengeToken, AuditActor, NetworkId, OwnerTrustRootToken, TrustAuthorityId,
 };
-use nodescale_runtime::{ProviderRuntime, RuntimeConfig, build_provider};
+use nodescale_runtime::{
+    ProviderRuntime, RuntimeConfig, build_provider, launch_adoption_target,
+    target_transport_exited_before_connect,
+};
 use nodescale_state::{ExistingProviderAdoptionProof, StateStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +15,7 @@ use std::{env, error::Error, fs, io::Write, net::SocketAddr, path::PathBuf, proc
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     net::TcpListener,
-    time::{Duration, timeout},
+    time::{Duration, Instant, timeout},
 };
 
 const MAX_PROOF_BYTES: usize = 16 * 1024;
@@ -25,6 +28,7 @@ struct Arguments {
     authorization_operation_id: String,
     proof_operation_id: String,
     listen: SocketAddr,
+    ssh_destination: String,
 }
 
 #[derive(Serialize)]
@@ -53,6 +57,7 @@ fn arguments() -> Result<Arguments, Box<dyn Error>> {
     let mut authorization_operation_id = None;
     let mut proof_operation_id = None;
     let mut listen = None;
+    let mut ssh_destination = None;
     while let Some(flag) = values.next() {
         let value = values.next().ok_or("every argument requires a value")?;
         match flag.as_str() {
@@ -63,6 +68,7 @@ fn arguments() -> Result<Arguments, Box<dyn Error>> {
             "--authorization-operation-id" => authorization_operation_id = Some(value),
             "--proof-operation-id" => proof_operation_id = Some(value),
             "--listen" => listen = Some(value.parse()?),
+            "--ssh-destination" => ssh_destination = Some(value),
             _ => return Err("unknown argument".into()),
         }
     }
@@ -75,6 +81,7 @@ fn arguments() -> Result<Arguments, Box<dyn Error>> {
             .ok_or("--authorization-operation-id is required")?,
         proof_operation_id: proof_operation_id.ok_or("--proof-operation-id is required")?,
         listen: listen.ok_or("--listen is required")?,
+        ssh_destination: ssh_destination.ok_or("--ssh-destination is required")?,
     })
 }
 
@@ -126,18 +133,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Utc::now(),
     )?;
     let encoded_challenge = action.challenge.with_encoded(str::to_owned);
-    println!(
-        "{}",
-        serde_json::to_string(&ChallengeDelivery {
-            action_id: &action.action_id,
-            challenge: &encoded_challenge,
-            provider_node_id: &action.provider_node_id,
-            listen: arguments.listen.to_string(),
-        })?
-    );
+    let delivery = serde_json::to_vec(&ChallengeDelivery {
+        action_id: &action.action_id,
+        challenge: &encoded_challenge,
+        provider_node_id: &action.provider_node_id,
+        listen: arguments.listen.to_string(),
+    })?;
+    let mut target_process =
+        launch_adoption_target(&arguments.ssh_destination, "proof", &delivery)?;
     std::io::stdout().flush()?;
 
-    let (stream, peer) = timeout(Duration::from_secs(300), listener.accept()).await??;
+    let connect_deadline = Instant::now() + Duration::from_secs(300);
+    let (stream, peer) = loop {
+        if target_transport_exited_before_connect(target_process.try_wait()?) {
+            return Err("target transport exited before connecting".into());
+        }
+        if Instant::now() >= connect_deadline {
+            return Err("target transport did not connect before timeout".into());
+        }
+        match timeout(Duration::from_millis(100), listener.accept()).await {
+            Ok(result) => break result?,
+            Err(_) => continue,
+        }
+    };
     let mut line = Vec::new();
     timeout(
         Duration::from_secs(10),
@@ -150,6 +168,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Err("target proof payload is empty or oversized".into());
     }
     let target: TargetProof = serde_json::from_slice(&line)?;
+    if !target_process.wait()?.success() {
+        return Err("target-origin proof delivery failed".into());
+    }
     if target.action_id != action.action_id || target.provider_node_id != action.provider_node_id {
         return Err("target proof action or stable node identity mismatched".into());
     }
