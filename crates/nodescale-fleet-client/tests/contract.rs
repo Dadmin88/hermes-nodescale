@@ -125,6 +125,45 @@ async fn apply_uses_the_exact_fleet_document_and_outcomes() {
     assert_eq!(result.outcome, ApplyOutcome::AlreadyApplied);
 }
 
+#[tokio::test]
+async fn apply_serializes_authenticated_provenance_as_the_exact_optional_pair() {
+    let path = socket_path("authenticated-apply");
+    let listener = UnixListener::bind(&path).expect("bind test socket");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept client");
+        let request: serde_json::Value =
+            serde_json::from_slice(&read_request_after_client_half_close(&mut stream).await)
+                .expect("typed apply JSON");
+        assert_eq!(
+            request["document"]["provenance"],
+            serde_json::json!({
+                "source": "nodescale",
+                "network_id": "net-a",
+                "device_id": "device-a",
+                "snapshot": "7",
+                "binding_id": "binding-current",
+                "authenticated_peer_id": "peer-current"
+            })
+        );
+        write_frame(
+            &mut stream,
+            r#"{"schema":"fleet.managed-projection.v1","kind":"apply","ok":true,"result":{"outcome":"applied"}}"#,
+        )
+        .await;
+    });
+
+    let mut authenticated = document();
+    authenticated.provenance =
+        Provenance::authenticated("net-a", "device-a", "7", "binding-current", "peer-current");
+    let result = FleetClient::new(&path)
+        .apply(authenticated)
+        .await
+        .expect("authenticated apply result");
+    server.await.expect("server task");
+    std::fs::remove_file(&path).expect("remove socket");
+    assert_eq!(result.outcome, ApplyOutcome::Applied);
+}
+
 #[test]
 fn all_current_fleet_apply_outcomes_decode_exactly() {
     use nodescale_fleet_client::{ApplyOutcome, ApplyResult};
@@ -215,6 +254,42 @@ async fn inspect_sends_the_full_selector_and_decodes_authoritative_generated_and
             .operator_denied_operations,
         vec![GeneratedOperation::Health]
     );
+}
+
+#[tokio::test]
+async fn inspect_decodes_persisted_authenticated_provenance_exactly() {
+    let path = socket_path("authenticated-inspect");
+    let listener = UnixListener::bind(&path).expect("bind test socket");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept client");
+        let _ = read_request_after_client_half_close(&mut stream).await;
+        write_frame(
+            &mut stream,
+            r#"{"schema":"fleet.managed-projection.v1","kind":"inspect","ok":true,"result":{"generated":{"state":"active","projection_generation":"7","membership_generation":"7","binding_generation":"7","content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowed_operations":["fleet.health"],"provenance":{"source":"nodescale","network_id":"net-a","device_id":"device-a","snapshot":"7","binding_id":"binding-current","authenticated_peer_id":"peer-current"}},"effective":{"state":"active","allowed_operations":["fleet.health"],"operator_denied_operations":[]}}}"#,
+        )
+        .await;
+    });
+
+    let result = FleetClient::new(&path)
+        .inspect(InspectSelector::new("net-a", "device-a"))
+        .await
+        .expect("authenticated read-back result");
+    server.await.expect("server task");
+    std::fs::remove_file(&path).expect("remove socket");
+    assert_eq!(
+        result.generated.expect("generated state").provenance,
+        Provenance::authenticated("net-a", "device-a", "7", "binding-current", "peer-current")
+    );
+}
+
+#[test]
+fn partial_authenticated_provenance_is_rejected_on_decode() {
+    for partial in [
+        r#"{"source":"nodescale","network_id":"net-a","device_id":"device-a","snapshot":"7","binding_id":"binding-current"}"#,
+        r#"{"source":"nodescale","network_id":"net-a","device_id":"device-a","snapshot":"7","authenticated_peer_id":"peer-current"}"#,
+    ] {
+        assert!(serde_json::from_str::<Provenance>(partial).is_err());
+    }
 }
 
 #[tokio::test]

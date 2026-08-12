@@ -66,10 +66,15 @@ The only request variants are:
 `projection_generation`, `membership_generation`, `binding_generation`,
 `content_hash`, `operation`, `generated_operations`, and `provenance`.
 `inspect.selector` has exactly `source`, `network_id`, and `device_id`.
-`provenance` has exactly `source`, `network_id`, `device_id`, and `snapshot`,
-and its identity fields must match the enclosing document. All document and
-selector scalar identifiers are bounded nonempty strings; generated operations
-are a list of strings.
+`provenance` always has `source`, `network_id`, `device_id`, and `snapshot` and
+may also contain `binding_id` and `authenticated_peer_id`. Its identity fields
+must match the enclosing document. Nodescale emits both optional authenticated
+fields together only from current verified active N6 provenance; legacy/local
+projections omit both and remain valid, but cannot thereby claim authenticated
+remote-publication authority. Fleet preserves present authenticated provenance
+through authoritative inspect read-back. All document and selector scalar
+identifiers are bounded nonempty strings; generated operations are a list of
+strings.
 
 ### Exact response envelopes and outcomes
 

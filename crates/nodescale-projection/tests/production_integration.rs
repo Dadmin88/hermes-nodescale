@@ -269,6 +269,11 @@ impl ScriptedTransport {
             !row.2.is_empty() && !row.3.is_empty() && row.4 > 0,
             "exact active N6 provenance is durable"
         );
+        assert_eq!(document.provenance.binding_id(), Some(row.2.as_str()));
+        assert_eq!(
+            document.provenance.authenticated_peer_id(),
+            Some(row.3.as_str())
+        );
         assert_eq!(row.5, "attempted", "attempted is recorded before apply");
         assert!(row.6 >= 0, "attempt timestamp is durable before apply");
         assert!(

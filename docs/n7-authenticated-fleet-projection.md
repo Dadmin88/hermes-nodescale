@@ -63,14 +63,20 @@ membership_generation, binding_generation, content_hash, operation,
 generated_operations, provenance
 ```
 
-`provenance` has exactly `source`, `network_id`, `device_id`, and `snapshot`;
-its identity fields must equal the enclosing document identity. `inspect.selector`
-has exactly `source`, `network_id`, and `device_id`. Scalar identifiers are
-bounded nonempty strings and `generated_operations` is a string list.
+`provenance` always has `source`, `network_id`, `device_id`, and `snapshot` and
+may additionally have `binding_id` and `authenticated_peer_id`. Its identity
+fields must equal the enclosing document identity. The authenticated Nodescale
+projection path emits both optional fields together from the current verified
+active N6 binding; legacy/local projections omit both. Their absence preserves
+the existing local projection contract but cannot fabricate authenticated
+remote-publication authority. `inspect.selector` has exactly `source`,
+`network_id`, and `device_id`. Scalar identifiers are bounded nonempty strings
+and `generated_operations` is a string list.
 
 These request restrictions do not erase the response's explicit typed values:
 responses use Boolean `ok` and `inspect` uses `null` for a missing durable
-record. No V1 response status is a JSON number.
+record. A present generated record returns the same optional authenticated
+provenance fields Fleet persisted. No V1 response status is a JSON number.
 
 ## 4. Exact request/response shapes
 
