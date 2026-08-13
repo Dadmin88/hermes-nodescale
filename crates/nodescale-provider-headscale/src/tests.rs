@@ -1055,6 +1055,21 @@ async fn future_version_is_reachable_but_unsupported() {
 }
 
 #[tokio::test]
+async fn future_version_remains_unsupported_when_database_is_unavailable() {
+    let (endpoint, _) = start_server(vec![
+        (200, r#"{"version":"v0.30.0","dirty":false}"#),
+        (200, r#"{"databaseConnectivity":false}"#),
+    ])
+    .await;
+    let inspection = test_provider(&endpoint, HeadscaleClientOptions::default())
+        .inspect_server()
+        .await
+        .unwrap();
+    assert_eq!(inspection.compatibility, CompatibilityStatus::Unsupported);
+    assert!(!inspection.mutation_allowed);
+}
+
+#[tokio::test]
 async fn doctor_report_is_sanitized_and_mutation_is_always_disabled() {
     let (endpoint, _) = start_server(vec![
         (200, include_str!("../fixtures/v0.29.3-version.json")),

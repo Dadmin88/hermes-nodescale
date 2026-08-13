@@ -548,7 +548,12 @@ impl HeadscaleProvider {
             constraints.push("Headscale build reports uncommitted source changes".into());
         }
         if !health.database_connectivity {
-            compatibility = CompatibilityStatus::ReadOnlyDegraded;
+            if matches!(
+                compatibility,
+                CompatibilityStatus::Compatible | CompatibilityStatus::CompatibleWithConstraints
+            ) {
+                compatibility = CompatibilityStatus::ReadOnlyDegraded;
+            }
             constraints.push("provider database connectivity is unavailable".into());
         }
 
