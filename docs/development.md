@@ -82,7 +82,8 @@ Nodescale deliberately avoids introducing a message broker, cache service, distr
 
 ## Versioned binary releases
 
-A signed repository tag matching `v*` runs `.github/workflows/release.yml`. The
+A repository tag using a release name such as `v1.0.0` runs
+`.github/workflows/release.yml`. The
 workflow builds every `nodescale-runtime` binary with the locked dependency
 graph and publishes one Linux x86-64 archive plus a SHA-256 checksum. The
 archive includes the systemd unit template but contains no configuration,

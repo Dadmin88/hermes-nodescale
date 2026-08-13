@@ -21,6 +21,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]
           artifact="nodescale-${TAG}-x86_64-unknown-linux-gnu"
           mkdir -p "dist/$artifact"
           for binary in \
@@ -37,7 +38,7 @@ jobs:
           done
           install -m 0644 packaging/systemd/nodescale-runtime.service "dist/$artifact/nodescale-runtime.service"
           tar -C dist -czf "dist/$artifact.tar.gz" "$artifact"
-          sha256sum "dist/$artifact.tar.gz" > "dist/$artifact.tar.gz.sha256"
+          (cd dist && sha256sum "$artifact.tar.gz" > "$artifact.tar.gz.sha256")
       - name: Publish versioned artifacts and checksums
         uses: softprops/action-gh-release@v2
         with:
